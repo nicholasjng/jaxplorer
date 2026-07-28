@@ -5,8 +5,9 @@ the compile worker imports that, so anything pulled in here would land in every 
 startup path, textual included.
 
 The pieces live in :mod:`jaxplorer.app` (the TUI), :mod:`jaxplorer.session` (worker ownership),
-:mod:`jaxplorer.worker` (the compile chain), :mod:`jaxplorer.protocol` (the wire types) and
-:mod:`jaxplorer.hlo` (HLO text handling).
+:mod:`jaxplorer.worker` (the compile chain), :mod:`jaxplorer.protocol` (the wire types),
+:mod:`jaxplorer.hlo` (HLO text handling), :mod:`jaxplorer.hlograph` (HLO text as a graph) and
+:mod:`jaxplorer.hlodiff` (comparing two of those graphs).
 """
 
 __version__ = "0.1.0"

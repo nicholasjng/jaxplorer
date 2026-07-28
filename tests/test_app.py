@@ -2,8 +2,10 @@
 
 import asyncio
 from dataclasses import replace
+from typing import cast
 
-from textual.widgets import Input, Static, TabbedContent, Tabs, TextArea
+from rich.text import Text
+from textual.widgets import HelpPanel, Input, Static, TabbedContent, Tabs, TextArea
 
 from jaxplorer.app import JaxplorerApp, OutputPane
 from jaxplorer.protocol import CompileResult
@@ -302,6 +304,70 @@ async def test_search_highlights_counts_and_cycles(snippet):
         assert f"{total}/{total}" in status_text(app)
 
 
+def highlighted(app: JaxplorerApp, pane: str) -> int:
+    """How many spans the search actually painted, as opposed to claimed to find."""
+    body = cast("Text", app.query_one(f"#body-{pane}", Static).content)
+    return sum(1 for span in body.spans if "yellow" in str(span.style))
+
+
+async def test_an_uppercase_query_highlights_the_lowercase_hits_it_matched(snippet):
+    app = make_app(snippet)
+    async with app.run_test() as pilot:
+        await settle(app, pilot=pilot)
+        app.action_show_pane("optimized_hlo")
+        await pilot.pause()
+
+        # Matching casefolds, so this finds lines; highlighting has to agree, or the pane
+        # scrolls to a hit and shows nothing.
+        app._apply_query("TANH")
+
+        assert app._matches
+        assert highlighted(app, "optimized_hlo") > 0
+
+
+async def test_matches_do_not_outlive_the_text_they_indexed(snippet):
+    app = make_app(snippet)
+    async with app.run_test() as pilot:
+        result = await settle(app, pilot=pilot)
+        app.action_show_pane("optimized_hlo")
+        await pilot.pause()
+        app._apply_query("tanh")
+        assert app._matches
+
+        # Stand in for a recompile that produced a much shorter module.
+        app._show("optimized_hlo", "one\ntwo\nthree\n")
+        app._render(result)
+        await pilot.pause()
+
+        lines = len(app.query_one("#pane-optimized_hlo", OutputPane).lines)
+        assert all(index < lines for index in app._matches)
+        # And the highlight the re-render dropped is back, so n/N mean something.
+        assert not app._matches or highlighted(app, "optimized_hlo") > 0
+
+
+async def test_escape_abandons_the_search(snippet):
+    app = make_app(snippet)
+    async with app.run_test() as pilot:
+        await settle(app, pilot=pilot)
+        app.action_show_pane("optimized_hlo")
+        await pilot.pause()
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+        app.query_one("#search", Input).value = "f32"
+        await pilot.pause()
+        assert app._matches
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert not app.query_one("#search", Input).has_class("visible")
+        assert app._query == ""
+        assert app._matches == []
+        assert highlighted(app, "optimized_hlo") == 0
+        # Focus lands somewhere useful rather than on the hidden input.
+        assert isinstance(app.focused, OutputPane)
+
+
 async def test_search_scrolls_the_pane_to_the_hit(snippet):
     app = make_app(snippet)
     async with app.run_test(size=(80, 14)) as pilot:
@@ -428,6 +494,143 @@ async def test_collecting_passes_fills_both_panes(snippet):
         assert "pipeline order" in passes
         assert "define" in pane_text(app, "llvm_ir")
         assert "passes" in status_text(app)
+
+
+async def test_f4_switches_the_passes_pane_between_diff_modes(snippet):
+    app = make_app(snippet, passes=True)
+    async with app.run_test() as pilot:
+        await settle(app, pilot=pilot)
+
+        # Text is the default, because it is the view that cannot be wrong.
+        assert not app.structural_diff
+        assert "text diff" in status_text(app)
+        assert "@@" in pane_text(app, "passes")
+
+        await pilot.press("f4")
+        await pilot.pause()
+
+        assert app.structural_diff
+        assert "structural diff" in status_text(app)
+        structural = pane_text(app, "passes")
+        # Both renderings keep the same document shape, so only the bodies differ.
+        assert "snapshots" in structural
+        assert "pipeline order" in structural
+        assert "@@" not in structural
+
+        await pilot.press("f4")
+        await pilot.pause()
+
+        assert not app.structural_diff
+        assert "@@" in pane_text(app, "passes")
+
+
+async def test_the_status_line_says_when_the_chain_stopped_early(snippet):
+    app = make_app(snippet, stages=["jaxpr", "stablehlo"])
+    async with app.run_test() as pilot:
+        await settle(app, pilot=pilot)
+
+        # The timings shown cover a subset of the pipeline, so say so.
+        assert "ran 2/4 stages" in status_text(app)
+
+
+async def test_the_status_line_stays_quiet_when_every_stage_ran(snippet):
+    app = make_app(snippet)
+    async with app.run_test() as pilot:
+        await settle(app, pilot=pilot)
+
+        assert "stages" not in status_text(app)
+
+
+async def test_f3_leaves_the_passes_pane_alone(snippet):
+    app = make_app(snippet, passes=True)
+    async with app.run_test() as pilot:
+        await settle(app, pilot=pilot)
+        before = pane_text(app, "passes")
+
+        app.show_metadata = True
+        await pilot.pause()
+
+        # pass_report already strips the tables from both sides of every diff, so there is
+        # nothing left for the filter to do here; it must not mangle the report either.
+        assert pane_text(app, "passes") == before
+        # And the pane it does own still changes.
+        assert "FileNames" in pane_text(app, "optimized_hlo")
+
+
+async def test_f1_toggles_the_key_panel(snippet):
+    app = make_app(snippet)
+    async with app.run_test() as pilot:
+        await settle(app, pilot=pilot)
+        assert not app.query(HelpPanel)
+
+        await pilot.press("f1")
+        await pilot.pause()
+        assert app.query(HelpPanel)
+
+        await pilot.press("f1")
+        await pilot.pause()
+        assert not app.query(HelpPanel)
+
+
+async def test_question_mark_opens_the_keys_from_a_pane_but_types_in_the_editor(snippet):
+    app = make_app(snippet)
+    async with app.run_test() as pilot:
+        await settle(app, pilot=pilot)
+        app.query_one("#pane-optimized_hlo", OutputPane).focus()
+        await pilot.pause()
+
+        await pilot.press("question_mark")
+        await pilot.pause()
+        assert app.query(HelpPanel)
+
+        # The reason it is bound on the pane and not the app: in the editor it is a character.
+        editor = app.query_one("#editor", TextArea)
+        editor.focus()
+        await pilot.pause()
+        before = editor.text
+        await pilot.press("question_mark")
+        await pilot.pause()
+
+        assert editor.text != before
+
+
+async def test_bracket_keys_step_between_pass_report_blocks(snippet):
+    app = make_app(snippet, passes=True)
+    async with app.run_test(size=(100, 24)) as pilot:
+        await settle(app, pilot=pilot)
+        app.action_show_pane("passes")
+        await pilot.pause()
+        pane = app.query_one("#pane-passes", OutputPane)
+        pane.focus()
+        await pilot.pause()
+        assert len(pane.blocks) > 2, "need several blocks to have somewhere to step"
+
+        await pilot.press("]")
+        await pilot.pause()
+        first = pane.scroll_offset.y
+        await pilot.press("]")
+        await pilot.pause()
+        second = pane.scroll_offset.y
+        await pilot.press("[")
+        await pilot.pause()
+
+        assert second > first
+        assert pane.scroll_offset.y == first
+
+
+async def test_the_bracket_keys_do_nothing_in_a_pane_without_blocks(snippet):
+    app = make_app(snippet)
+    async with app.run_test() as pilot:
+        await settle(app, pilot=pilot)
+        pane = app.query_one("#pane-jaxpr", OutputPane)
+        pane.focus()
+        await pilot.pause()
+        assert pane.blocks == []
+
+        await pilot.press("]")
+        await pilot.pause()
+
+        assert pane.scroll_offset.y == 0
 
 
 async def test_f6_toggles_pass_collection_at_runtime(snippet):

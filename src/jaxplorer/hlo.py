@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from jaxplorer.hlodiff import structural_pass_report
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -76,7 +78,9 @@ def _attribute(before: PassSnapshot, after: PassSnapshot) -> str:
     return f"entering {after.pipeline}, after {before.after} in {before.pipeline}"
 
 
-def pass_report(snapshots: Sequence[PassSnapshot], *, context: int = 2) -> str:
+def pass_report(
+    snapshots: Sequence[PassSnapshot], *, context: int = 2, structural: bool = False
+) -> str:
     """Summarize what each XLA pass did to the module.
 
     Most passes change nothing, so the diffs lead and the pipeline order follows as an
@@ -89,6 +93,11 @@ def pass_report(snapshots: Sequence[PassSnapshot], *, context: int = 2) -> str:
         Snapshots in the order XLA produced them.
     context : int, optional
         Lines of context around each diff hunk.
+    structural : bool, optional
+        Compare the modules as graphs rather than as text, via :mod:`jaxplorer.hlodiff`. A
+        rescheduling pass reports nothing under this mode and a whole-module renaming
+        reports a handful of instructions, neither of which a line diff can manage. Falls
+        back to the text diff, with a note, when the module text does not parse cleanly.
 
     Returns
     -------
@@ -97,7 +106,21 @@ def pass_report(snapshots: Sequence[PassSnapshot], *, context: int = 2) -> str:
         snapshot's label with a ``*`` against the ones that changed something.
     """
     if not snapshots:
-        return "No pass snapshots.\n\nRun jaxplorer with --passes, or press f6, to collect them."
+        return (
+            "No pass snapshots.\n\nRun jaxplorer with --passes, or press f6, to collect them.\n"
+            "Once collected, f4 switches this pane between a text diff and a structural one, "
+            "and ] / [ step between sections."
+        )
+
+    note = ""
+    if structural:
+        report = structural_pass_report(snapshots, attribute=_attribute)
+        if report is not None:
+            return report
+        note = (
+            "Structural diff unavailable: the module text did not parse cleanly enough to "
+            "trust it.\nShowing a text diff instead.\n\n"
+        )
 
     diffs: list[str] = []
     changed: set[int] = set()
@@ -115,7 +138,7 @@ def pass_report(snapshots: Sequence[PassSnapshot], *, context: int = 2) -> str:
     index = "\n".join(
         f"  {'*' if snapshot.index in changed else ' '} {snapshot.label}" for snapshot in snapshots
     )
-    return f"{head}\n\n{body}\n\n===== pipeline order =====\n{index}\n"
+    return f"{note}{head}\n\n{body}\n\n===== pipeline order =====\n{index}\n"
 
 
 @dataclass(frozen=True, slots=True)

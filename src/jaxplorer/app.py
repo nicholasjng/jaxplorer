@@ -19,7 +19,17 @@ from textual.containers import Horizontal, ScrollableContainer
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.reactive import var
-from textual.widgets import Footer, Header, Input, Static, TabbedContent, TabPane, Tabs, TextArea
+from textual.widgets import (
+    Footer,
+    Header,
+    HelpPanel,
+    Input,
+    Static,
+    TabbedContent,
+    TabPane,
+    Tabs,
+    TextArea,
+)
 
 from jaxplorer.hlo import DebugInfo, pass_report, strip_debug_tables
 from jaxplorer.protocol import ALL_STAGES, PANE_TITLES, CompileResult, Pane, Stage
@@ -28,8 +38,13 @@ from jaxplorer.watch import POLL_INTERVAL, FileWatcher
 
 PANES: tuple[Pane, ...] = (*ALL_STAGES, "passes", "llvm_ir", "errors")
 
-# Panes whose text is an HLO module, so the debug-table filter and click-to-source apply.
+# Panes holding HLO instructions, so a click can be traced back to the source that built one.
 HLO_PANES: frozenset[Pane] = frozenset({"optimized_hlo", "passes"})
+
+# Where f3 does something. Only the optimized-HLO pane shows a whole module with the debug
+# tables still attached; pass_report has already stripped them from both sides of every diff
+# it renders, so filtering the Passes pane was a no-op that made the key look broken.
+METADATA_PANES: frozenset[Pane] = frozenset({"optimized_hlo"})
 
 # Long enough that ordinary typing does not trigger a compile, short enough that a
 # pause feels immediate.
@@ -100,11 +115,16 @@ class OutputPane(ScrollableContainer):
         Text as the worker sent it, before filtering.
     """
 
+    # Plain letters and punctuation, so these have to stay on the pane: bound app-wide they
+    # would be typed into the editor instead of reaching an action.
     BINDINGS: ClassVar = [
         Binding("slash", "find", "Find"),
         Binding("n", "next_match", "Next match", show=False),
         Binding("N", "prev_match", "Previous match", show=False),
         Binding("y", "copy", "Copy"),
+        Binding("question_mark", "help", "Keys", show=False),
+        Binding("right_square_bracket", "next_block", "Next block", show=False),
+        Binding("left_square_bracket", "prev_block", "Previous block", show=False),
     ]
 
     class Clicked(Message):
@@ -139,7 +159,7 @@ class OutputPane(ScrollableContainer):
         """The text as shown, which is what search and correlation must agree with."""
         app = self.app
         hide = not isinstance(app, JaxplorerApp) or not app.show_metadata
-        if hide and self.pane in HLO_PANES and self.raw:
+        if hide and self.pane in METADATA_PANES and self.raw:
             return strip_debug_tables(self.raw)
         return self.raw
 
@@ -165,8 +185,41 @@ class OutputPane(ScrollableContainer):
         # would otherwise try to parse.
         body = Text(self.displayed)
         if query:
-            body.highlight_regex(re.escape(query), style=MATCH_STYLE)
+            # IGNORECASE to agree with match_lines, which casefolds. Without it an uppercase
+            # query scrolls to a lowercase hit and highlights nothing.
+            body.highlight_regex(re.compile(re.escape(query), re.IGNORECASE), style=MATCH_STYLE)
         self._body.update(body)
+
+    @property
+    def blocks(self) -> list[int]:
+        """Displayed line indices where a report section starts.
+
+        The Passes pane is a sequence of ``===== pass (pipeline) =====`` headings, one per
+        transition that changed the module, and both the text and structural renderers emit
+        them. Everything else has no sections, so this is empty and the keys do nothing.
+        """
+        return [index for index, line in enumerate(self.lines) if line.startswith("=====")]
+
+    def action_next_block(self) -> None:
+        """Scroll to the next section heading."""
+        self._step_block(1)
+
+    def action_prev_block(self) -> None:
+        """Scroll to the previous section heading."""
+        self._step_block(-1)
+
+    def _step_block(self, delta: int) -> None:
+        blocks = self.blocks
+        if not blocks:
+            return
+        current = self.scroll_offset.y
+        # Strictly past the current position, so repeated presses keep moving; the +2 mirrors
+        # the context line the search scroll leaves above its hit.
+        if delta > 0:
+            target = next((line for line in blocks if line > current + 2), blocks[0])
+        else:
+            target = next((line for line in reversed(blocks) if line < current + 2), blocks[-1])
+        self.scroll_to(y=max(0, target - 2), animate=False)
 
     def match_lines(self, query: str) -> list[int]:
         """Return the indices of displayed lines containing ``query``, case-insensitively."""
@@ -201,6 +254,9 @@ class OutputPane(ScrollableContainer):
     def action_copy(self) -> None:
         self._jaxplorer.action_copy_pane()
 
+    def action_help(self) -> None:
+        self._jaxplorer.action_toggle_help()
+
 
 class JaxplorerApp(App[None]):
     """The application.
@@ -234,6 +290,8 @@ class JaxplorerApp(App[None]):
         Reactive status-bar text.
     show_metadata : bool
         Reactive: whether HLO debug tables are displayed.
+    structural_diff : bool
+        Reactive: whether the Passes pane compares modules as graphs rather than as text.
     session : WorkerSession
         The worker this app renders.
     """
@@ -254,16 +312,21 @@ class JaxplorerApp(App[None]):
     BINDINGS: ClassVar = [
         ("ctrl+r", "recompile", "Recompile"),
         ("ctrl+s", "save", "Save"),
-        # Also bound by SnippetEditor. These make undo work from the IR panes too, where
-        # the editor is not focused.
-        ("ctrl+z", "undo", "Undo"),
-        ("ctrl+y", "redo", "Redo"),
+        # Also bound by SnippetEditor. These make undo work from the IR panes too, where the
+        # editor is not focused, and the super+ forms have to be repeated here or cmd+z would
+        # work only while the editor holds focus.
+        ("ctrl+z,super+z", "undo", "Undo"),
+        ("ctrl+y,super+y", "redo", "Redo"),
         # priority=True because the focused TextArea binds these itself: f6 to select_line
         # today, and ctrl+f to delete_word_right before textual 8.2. Without it the
         # documented key silently does something else, or nothing, while you are editing.
         Binding("ctrl+f", "find", "Find", priority=True),
+        # The footer holds about a third of these on an 80-column terminal, so the full list
+        # has to be reachable some other way.
+        ("f1", "toggle_help", "Keys"),
         ("f2", "cycle_platform", "Platform"),
         ("f3", "toggle_metadata", "Metadata"),
+        ("f4", "toggle_diff_mode", "Diff mode"),
         Binding("f6", "toggle_passes", "Passes", priority=True),
         ("alt+1", "show_pane('jaxpr')", "Jaxpr"),
         ("alt+2", "show_pane('stablehlo')", "StableHLO"),
@@ -277,6 +340,9 @@ class JaxplorerApp(App[None]):
 
     status: var[str] = var("starting worker …")
     show_metadata: var[bool] = var(False)
+    # Defaults to the text diff: for a local change, seeing which four lines went away beats
+    # a count of them, and the structural matcher has no oracle to be checked against.
+    structural_diff: var[bool] = var(False)
 
     def __init__(
         self,
@@ -290,6 +356,7 @@ class JaxplorerApp(App[None]):
         passes: bool = False,
         timeout: float = 20.0,
         executable: str | None = None,
+        structural_diff: bool = False,
     ) -> None:
         super().__init__()
         self.path = path
@@ -311,6 +378,9 @@ class JaxplorerApp(App[None]):
         self._query = ""
         self._matches: list[int] = []
         self._match = 0
+        # Last, because assigning the reactive runs watch_structural_diff, which reads the
+        # attributes above.
+        self.structural_diff = structural_diff
 
     # -- composition ------------------------------------------------------------
 
@@ -345,6 +415,20 @@ class JaxplorerApp(App[None]):
         with suppress(NoMatches):
             for pane in self.query(OutputPane):
                 pane.refresh_text(self._query if pane.pane == self.active_pane else "")
+
+    def watch_structural_diff(self, structural: bool) -> None:
+        """Rebuild the Passes pane when the diff mode is toggled.
+
+        The report is recomputed rather than cached both ways, since the snapshots are still
+        in hand and a compile is orders of magnitude more expensive than a diff.
+        """
+        result = self._last_result
+        if result is None or result.fatal is not None:
+            return
+        with suppress(NoMatches):
+            self._show("passes", pass_report(result.passes, structural=structural))
+        # The status line names the mode, so leaving it alone would leave it lying.
+        self.status = self._status_line(result, result.errors())
 
     async def on_mount(self) -> None:
         """Start watching if asked to, then compile once so the panes are never empty."""
@@ -382,6 +466,11 @@ class JaxplorerApp(App[None]):
         elif isinstance(self.focused, OutputPane) and event.key == "escape":
             self.query_one(TabbedContent).query_one(Tabs).focus()
             event.stop()
+        elif isinstance(self.focused, Input) and event.key == "escape":
+            # Without this the only way out of the search bar is enter, which is not what
+            # escape means anywhere else in the app.
+            self._clear_search()
+            event.stop()
 
     def _poll_file(self) -> None:
         if self._watcher is None:
@@ -414,6 +503,17 @@ class JaxplorerApp(App[None]):
 
     def _close_search(self) -> None:
         self.query_one("#search", Input).remove_class("visible")
+
+    def _clear_search(self) -> None:
+        """Abandon the search: drop the query, the highlight and the match list."""
+        self._close_search()
+        self._query = ""
+        self._matches = []
+        self._match = 0
+        with suppress(NoMatches):
+            pane = self.query_one(f"#pane-{self.active_pane}", OutputPane)
+            pane.refresh_text()
+            pane.focus()
 
     def _apply_query(self, query: str) -> None:
         self._query = query
@@ -504,6 +604,18 @@ class JaxplorerApp(App[None]):
         """Show or hide the HLO debug tables."""
         self.show_metadata = not self.show_metadata
         self.notify(f"HLO debug tables {'shown' if self.show_metadata else 'hidden'}")
+
+    def action_toggle_help(self) -> None:
+        """Show or hide Textual's key panel, which lists every binding in scope."""
+        if self.query(HelpPanel):
+            self.action_hide_help_panel()
+        else:
+            self.action_show_help_panel()
+
+    def action_toggle_diff_mode(self) -> None:
+        """Switch the Passes pane between a text diff and a structural one."""
+        self.structural_diff = not self.structural_diff
+        self.notify(f"Pass diffs: {'structural' if self.structural_diff else 'text'}")
 
     def action_toggle_passes(self) -> None:
         """Turn per-pass collection on or off, then recompile to apply it."""
@@ -617,7 +729,7 @@ class JaxplorerApp(App[None]):
 
             hlo = result.stages.get("optimized_hlo")
             self._debug_info = DebugInfo.parse(hlo.text) if hlo and hlo.text else None
-            self._show("passes", pass_report(result.passes))
+            self._show("passes", pass_report(result.passes, structural=self.structural_diff))
             self._show("llvm_ir", result.llvm_ir or _NO_LLVM_IR)
 
         errors = result.errors()
@@ -630,6 +742,15 @@ class JaxplorerApp(App[None]):
 
         if result.fatal:
             self.query_one(TabbedContent).active = "errors"
+
+        # Fresh text means the old line numbers are meaningless. Re-running the query restores
+        # both the highlight that `OutputPane.show` dropped and a match list that matches what
+        # is on screen; without this, `n` walks to line numbers from the previous compile.
+        if self._query:
+            self._apply_query(self._query)
+        else:
+            self._matches = []
+            self._match = 0
 
         self.status = self._status_line(result, errors)
 
@@ -647,9 +768,14 @@ class JaxplorerApp(App[None]):
         if timings:
             parts.append(timings)
         parts.append(f"total {result.total_ms:.0f} ms")
+        # Worth stating when the chain stopped early: the timings above then account for a
+        # subset of the pipeline, and the difference is the work --stages avoided.
+        if result.stages_run and len(result.stages_run) < len(ALL_STAGES):
+            parts.append(f"ran {len(result.stages_run)}/{len(ALL_STAGES)} stages")
         parts.append(f"{len(errors)} error(s)" if errors else "ok")
         if result.passes:
-            parts.append(f"{len(result.passes)} passes")
+            mode = "structural" if self.structural_diff else "text"
+            parts.append(f"{len(result.passes)} passes ({mode} diff)")
         if self.watch_mode:
             parts.append("watching")
         return " · ".join(parts)
