@@ -1,0 +1,28 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      # Mints the OIDC token PyPI trusts, which is what replaces a long-lived API token.
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          # setup-uv caches by default, and a job that publishes must not restore a cache a
+          # lower-privilege run could have poisoned. A one-shot build gains nothing from it.
+          enable-cache: false
+      - name: Build the sdist and wheel
+        run: uv build
+      - uses: pypa/gh-action-pypi-publish@2834a314042ef964da07689278dd1e9d773e8afd # v1.14.1
