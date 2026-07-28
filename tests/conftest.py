@@ -28,7 +28,8 @@ def fatal(result: CompileResult) -> str:
 
 @pytest.fixture(scope="session")
 def examples_dir() -> Path:
-    return REPO_ROOT / "examples"
+    # Inside the package, so they ship in the wheel and `jaxplorer mlp` resolves them.
+    return REPO_ROOT / "src" / "jaxplorer" / "examples"
 
 
 @pytest.fixture
