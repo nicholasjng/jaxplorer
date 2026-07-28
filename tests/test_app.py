@@ -7,7 +7,7 @@ from typing import cast
 from rich.text import Text
 from textual.widgets import HelpPanel, Input, Static, TabbedContent, Tabs, TextArea
 
-from jaxplorer.app import JaxplorerApp, OutputPane
+from jaxplorer.app import MAX_HIGHLIGHTS, JaxplorerApp, OutputPane
 from jaxplorer.protocol import CompileResult
 
 
@@ -323,6 +323,72 @@ async def test_an_uppercase_query_highlights_the_lowercase_hits_it_matched(snipp
 
         assert app._matches
         assert highlighted(app, "optimized_hlo") > 0
+
+
+def styled(app: JaxplorerApp, pane: str, style: str) -> int:
+    body = cast("Text", app.query_one(f"#body-{pane}", Static).content)
+    return sum(1 for span in body.spans if style in str(span.style))
+
+
+async def test_the_current_hit_is_painted_differently_and_moves_with_n(snippet):
+    app = make_app(snippet)
+    async with app.run_test() as pilot:
+        await settle(app, pilot=pilot)
+        app.action_show_pane("optimized_hlo")
+        await pilot.pause()
+
+        app._apply_query("tanh")
+        assert len(app._matches) > 1
+        first = app._matches[app._match]
+        assert styled(app, "optimized_hlo", "orange1") > 0
+
+        app.action_next_match()
+        await pilot.pause()
+
+        # The emphasis follows the cursor rather than staying on the first hit.
+        assert app._matches[app._match] != first
+        assert styled(app, "optimized_hlo", "orange1") > 0
+
+
+async def test_painted_hits_are_capped_but_the_count_is_not(snippet):
+    app = make_app(snippet)
+    async with app.run_test() as pilot:
+        await settle(app, pilot=pilot)
+        app.action_show_pane("optimized_hlo")
+        await pilot.pause()
+        pane = app.query_one("#pane-optimized_hlo", OutputPane)
+        # More hits than the cap. A span per hit is what makes a big module unusable to
+        # search: 40k of them measured 24 ms to build and 91 ms for Textual to render.
+        pane.show("\n".join(f"  %v{i} = f32[4] tanh(%v0)" for i in range(MAX_HIGHLIGHTS * 2)))
+        await pilot.pause()
+
+        app._apply_query("tanh")
+
+        assert len(app._matches) == MAX_HIGHLIGHTS * 2
+        assert f"1/{MAX_HIGHLIGHTS * 2}" in status_text(app)
+        # Cap plus the current hit painted on top of it.
+        assert styled(app, "optimized_hlo", "yellow") <= MAX_HIGHLIGHTS
+        assert styled(app, "optimized_hlo", "orange1") > 0
+
+
+async def test_a_hit_past_the_paint_cap_is_still_shown_when_visited(snippet):
+    app = make_app(snippet)
+    async with app.run_test() as pilot:
+        await settle(app, pilot=pilot)
+        app.action_show_pane("optimized_hlo")
+        await pilot.pause()
+        pane = app.query_one("#pane-optimized_hlo", OutputPane)
+        pane.show("\n".join(f"  %v{i} = f32[4] tanh(%v0)" for i in range(MAX_HIGHLIGHTS * 2)))
+        await pilot.pause()
+        app._apply_query("tanh")
+
+        # Jump backwards to the last hit, which is far beyond the cap.
+        app.action_prev_match()
+        await pilot.pause()
+
+        assert app._matches[app._match] > MAX_HIGHLIGHTS
+        # This is what makes the cap safe: wherever you navigate, that hit is painted.
+        assert styled(app, "optimized_hlo", "orange1") > 0
 
 
 async def test_matches_do_not_outlive_the_text_they_indexed(snippet):
