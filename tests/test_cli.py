@@ -75,8 +75,7 @@ def test_help_uses_spiky_metavars_and_stays_plain_when_piped():
     assert "<stages>" in help_text
     assert "<timeout>" in help_text
     assert "TIMEOUT" not in help_text
-    # A flag with choices shows them instead, which is more useful than any metavar.
-    assert "{cpu,gpu,tpu}" in help_text
+    assert "(cpu|gpu|tpu)" in help_text
     # Captured stdout is not a TTY, so no escape codes may leak into pipes or CI logs.
     assert "\x1b[" not in help_text
 

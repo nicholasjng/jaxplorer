@@ -276,6 +276,9 @@ async def test_search_highlights_counts_and_cycles(snippet):
     async with app.run_test() as pilot:
         await settle(app, pilot=pilot)
         app.query_one("#outputs", TabbedContent).active = "optimized_hlo"
+        # With the editor focused, which is where a user actually is: TextArea binds ctrl+f
+        # itself, so only a priority binding gets the key.
+        app.query_one("#editor", TextArea).focus()
         await pilot.pause()
 
         await pilot.press("ctrl+f")
@@ -432,11 +435,17 @@ async def test_f6_toggles_pass_collection_at_runtime(snippet):
         first = await settle(app, pilot=pilot)
         assert not first.passes
 
+        # TextArea binds f6 to select_line, so without a priority binding this key selects
+        # a line in the buffer instead of toggling anything.
+        editor = app.query_one("#editor", TextArea)
+        editor.focus()
+        await pilot.pause()
         await pilot.press("f6")
         second = await settle(app, pilot=pilot, after=first)
 
         assert app.collect_passes
         assert second.passes
+        assert editor.selected_text == ""  # and the buffer was left alone
 
 
 async def test_a_stage_subset_leaves_the_other_panes_labelled(snippet):

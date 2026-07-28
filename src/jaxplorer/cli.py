@@ -12,6 +12,7 @@ import re
 import sys
 from pathlib import Path
 
+from jaxplorer import __version__
 from jaxplorer.protocol import ALL_STAGES
 from jaxplorer.session import DEFAULT_TIMEOUT
 
@@ -80,43 +81,45 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="jaxplorer",
         formatter_class=_HelpFormatter,
-        description="A compiler explorer TUI for JAX: inspect the jaxpr, StableHLO and "
+        description="A compiler explorer TUI for JAX: Inspect the jaxpr, StableHLO and "
         "optimized HLO of a jitted function as you edit it.",
         epilog="A snippet must define a callable `f` and a tuple `args` of example "
         "inputs (concrete arrays or jax.ShapeDtypeStruct).",
     )
     parser.add_argument(
-        "file", nargs="?", type=Path, help="snippet to open; omit for a scratch buffer"
+        "file", nargs="?", type=Path, help="Snippet to open; omit for a scratch buffer."
     )
+    parser.add_argument("--version", action="version", version=f"jaxplorer {__version__}")
     parser.add_argument(
         "--watch",
         action="store_true",
-        help="reload FILE when it changes on disk and keep the buffer read-only, "
-        "so you can edit in your own editor",
+        help="Reload FILE when it changes on disk and keep the buffer read-only, "
+        "so you can edit in your own editor.",
     )
     parser.add_argument(
         "--platform",
         choices=PLATFORMS,
-        help="JAX platform to compile for; defaults to JAX's own choice",
+        metavar="(cpu|gpu|tpu)",
+        help="JAX platform to compile for; defaults to JAX's own choice.",
     )
     parser.add_argument("--x64", action="store_true", help="enable 64-bit values")
     parser.add_argument(
         "--stages",
         type=_stage_list,
         default=list(ALL_STAGES),
-        help=f"comma-separated subset of {', '.join(ALL_STAGES)}. Stopping before "
-        "optimized_hlo skips XLA entirely, which is much faster on a large model",
+        help=f"Comma-separated subset of {', '.join(ALL_STAGES)}. Stopping before "
+        "optimized_hlo skips XLA entirely, which is much faster on a large model.",
     )
     parser.add_argument(
         "--passes",
         action="store_true",
-        help="also collect per-pass HLO snapshots and LLVM IR, via XLA's dump flags",
+        help="Also collect per-pass HLO snapshots and LLVM IR, via XLA's dump flags.",
     )
     parser.add_argument(
         "--timeout",
         type=float,
         default=DEFAULT_TIMEOUT,
-        help=f"give up on a compile after this long, in seconds (default: {DEFAULT_TIMEOUT:g})",
+        help=f"Give up on a compile after this long, in seconds (default: {DEFAULT_TIMEOUT:g}s).",
     )
     return parser
 

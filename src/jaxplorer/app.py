@@ -255,10 +255,13 @@ class JaxplorerApp(App[None]):
         # the editor is not focused.
         ("ctrl+z", "undo", "Undo"),
         ("ctrl+y", "redo", "Redo"),
-        ("ctrl+f", "find", "Find"),
+        # priority=True because the focused TextArea binds these itself: f6 to select_line
+        # today, and ctrl+f to delete_word_right before textual 8.2. Without it the
+        # documented key silently does something else, or nothing, while you are editing.
+        Binding("ctrl+f", "find", "Find", priority=True),
         ("f2", "cycle_platform", "Platform"),
         ("f3", "toggle_metadata", "Metadata"),
-        ("f6", "toggle_passes", "Passes"),
+        Binding("f6", "toggle_passes", "Passes", priority=True),
         ("alt+1", "show_pane('jaxpr')", "Jaxpr"),
         ("alt+2", "show_pane('stablehlo')", "StableHLO"),
         ("alt+3", "show_pane('optimized_hlo')", "Opt HLO"),
