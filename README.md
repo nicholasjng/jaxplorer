@@ -4,7 +4,7 @@ A compiler explorer TUI for JAX. Put a jitted function on the left, watch its ja
 StableHLO and optimized HLO on the right, and see all three change as you type.
 
 ```
-┌─ source ──────────────────┬─ Jaxpr │ StableHLO │ Optimized HLO │ Analysis │ Errors ─┐
+┌─ source ─────────┬─ Jaxpr │ StableHLO │ Optimized HLO │ Analysis │ Passes │ LLVM IR ─┐
 │ def f(x, w):              │ { lambda ; a:f32[8,16] b:f32[16,4]. let                 │
 │     return jnp.tanh(x @ w)│     c:f32[8,4] = dot_general[...] a b                   │
 │                           │     d:f32[8,4] = tanh c                                 │
@@ -27,32 +27,41 @@ Any CPU-only jax install is enough; a GPU or TPU backend is only needed to compi
 ## Usage
 
 ```bash
-uv run jaxplorer                      # scratch buffer
-uv run jaxplorer examples/mlp.py      # open a snippet and edit it in place
-uv run jaxplorer examples/mlp.py --watch   # keep editing in your own editor; jaxplorer reloads on save
+uv run jaxplorer                       # scratch buffer
+uv run jaxplorer mlp                   # open a bundled example (mlp, scan, attention)
+uv run jaxplorer my_model.py           # open a snippet and edit it in place
+uv run jaxplorer my_model.py --watch    # keep editing in your own editor; jaxplorer reloads on save
+uv run jaxplorer mlp --print optimized_hlo   # print one pane and exit, no TUI
 ```
 
 | key | |
 | --- | --- |
+| `f1` or `?` | list every key (the footer only fits a few) |
 | `ctrl+r` | recompile now |
 | `ctrl+s` | save the buffer |
-| `ctrl+z`, `ctrl+y` | undo, redo in the editor (`cmd+z` / `cmd+y` also work) |
-| `ctrl+f` or `/` | find in the active pane; `n` / `N` cycle the hits |
+| `ctrl+z`, `ctrl+y` | undo, redo (`cmd+z` / `cmd+y` also work) |
+| `ctrl+f` or `/` | find in the active pane; `n` / `N` cycle the hits, `escape` clears |
 | `f2` | switch backend (skips ones that already failed here) |
 | `f3` | show or hide the HLO debug tables |
+| `f4` | diff pass snapshots as graphs instead of as text |
 | `f6` | collect per-pass HLO and LLVM IR, then recompile |
 | `alt+1` … `alt+7` | jump to a pane |
 | `down` | from the tab bar into the IR, then arrows scroll it |
+| `]`, `[` | next, previous section in the Passes pane |
 | `y` | copy the active pane to the clipboard |
 | `escape` | from the IR back to the tab bar |
 | `ctrl+q` | quit |
 
-Click any HLO instruction to select the source line that produced it.
+Click an instruction in the Optimized HLO or Passes pane to select the source line that
+produced it.
 
-Other options: `--python PATH` (compile under another environment's jax, see below),
-`--platform cpu|gpu|tpu`, `--x64`, `--timeout SECONDS`,
-`--stages jaxpr,stablehlo,...` (stopping before `optimized_hlo` skips XLA, which is much
-faster on a large model), and `--passes` to collect per-pass HLO and LLVM IR from the start.
+Other options: `--version`, `--python PATH` (compile under another environment's jax, see
+below), `--platform cpu|gpu|tpu`, `--x64`, `--timeout SECONDS`,
+`--stages jaxpr,stablehlo,...` (the chain stops after the last stage asked for, so leaving out
+`optimized_hlo` skips XLA — most of a compile on a large model), `--passes` to collect per-pass
+HLO and LLVM IR from the start, `--structural-diff` to start with `f4` on,
+`--print PANE` to write one pane to stdout and exit instead of starting the TUI, and
+`--examples` to list the bundled snippets.
 
 ## Against your own project's jax
 
@@ -90,8 +99,10 @@ args = (
 
 `args` may hold concrete arrays or `jax.ShapeDtypeStruct` specs. jaxplorer only traces and
 compiles `f`, never runs it, so shape specs are enough. Optionally define `kwargs`,
-`static_argnums`, `static_argnames` or `donate_argnums`; they are passed to `jax.jit`. See
-`examples/` for an MLP, a `lax.scan` loop, and causal attention with a static argument.
+`static_argnums`, `static_argnames` or `donate_argnums`; they are passed to `jax.jit`. Three
+examples ship in the wheel — `jaxplorer mlp`, `jaxplorer scan`, `jaxplorer attention` — for an
+MLP, a `lax.scan` loop, and causal attention with a static argument. They open as a scratch
+buffer, so editing one cannot write over your installation.
 
 ## How it works
 
@@ -104,7 +115,7 @@ Each pane is one step of JAX's public lowering chain:
 | Optimized HLO | `.compile().as_text()`, after XLA's optimization passes |
 | Analysis | `.cost_analysis()` and `.memory_analysis()` |
 | Passes | a snapshot between every XLA pass, diffed to show which pass changed what |
-| LLVM IR | what the CPU backend handed to LLVM |
+| LLVM IR | the CPU backend's LLVM IR, after LLVM's own passes |
 
 Stages are reported independently, so a lowering failure still leaves you a valid jaxpr to
 read, and a buffer that does not even parse keeps the last IR that did compile on screen.
