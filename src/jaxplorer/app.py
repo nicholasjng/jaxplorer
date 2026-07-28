@@ -53,6 +53,12 @@ DEBOUNCE = 0.35
 PLATFORM_CYCLE = ("cpu", "gpu", "tpu")
 
 MATCH_STYLE = "black on yellow"
+# The hit n/N is sitting on, so it is distinguishable from the others around it.
+CURRENT_MATCH_STYLE = "black on orange1"
+
+# Cap on painted search hits per render. Not a limit on matches found: the status line counts
+# them all. See OutputPane.refresh_text for why the spans, not the text, are the cost.
+MAX_HIGHLIGHTS = 2_000
 
 # Short names for the status line, where four timings plus a total have to fit.
 STAGE_ABBREV: dict[Stage, str] = {
@@ -179,15 +185,48 @@ class OutputPane(ScrollableContainer):
         self.raw = text
         self.refresh_text()
 
-    def refresh_text(self, query: str = "") -> None:
-        """Re-render the body, optionally highlighting every occurrence of ``query``."""
+    def refresh_text(self, query: str = "", current: int | None = None) -> None:
+        """Re-render the body, highlighting ``query`` and emphasising the current hit.
+
+        Parameters
+        ----------
+        query : str, optional
+            Needle to paint. Empty leaves the text unstyled.
+        current : int, optional
+            Displayed line index of the hit being visited, painted in a second style so it
+            is findable among its neighbours.
+
+        Notes
+        -----
+        Only the first :data:`MAX_HIGHLIGHTS` occurrences are painted. A style span per hit is
+        by far the most expensive part of a keystroke — measured on a 1.9 MB module, 40k spans
+        cost 24 ms to build and 91 ms for Textual to render, against 3 ms to filter the text —
+        and a module with tens of thousands of hits gains nothing from painting them all. The
+        match counter in the status line comes from :meth:`match_lines`, so it stays truthful,
+        and ``current`` is painted whether or not the cap was reached, so navigating past it
+        still shows you where you are.
+        """
         # A Text object rather than a markup string: HLO is full of f32[8,16], which Rich
         # would otherwise try to parse.
-        body = Text(self.displayed)
+        text = self.displayed
+        body = Text(text)
         if query:
             # IGNORECASE to agree with match_lines, which casefolds. Without it an uppercase
             # query scrolls to a lowercase hit and highlights nothing.
-            body.highlight_regex(re.compile(re.escape(query), re.IGNORECASE), style=MATCH_STYLE)
+            pattern = re.compile(re.escape(query), re.IGNORECASE)
+            for painted, found in enumerate(pattern.finditer(text)):
+                if painted >= MAX_HIGHLIGHTS:
+                    break
+                body.stylize(MATCH_STYLE, found.start(), found.end())
+            if current is not None:
+                lines = self.lines
+                if 0 <= current < len(lines):
+                    # +1 per line for the newline that split() consumed.
+                    begin = sum(len(line) + 1 for line in lines[:current])
+                    for found in pattern.finditer(lines[current]):
+                        body.stylize(
+                            CURRENT_MATCH_STYLE, begin + found.start(), begin + found.end()
+                        )
         self._body.update(body)
 
     @property
@@ -414,7 +453,10 @@ class JaxplorerApp(App[None]):
         """Re-render every pane when the metadata filter is toggled."""
         with suppress(NoMatches):
             for pane in self.query(OutputPane):
-                pane.refresh_text(self._query if pane.pane == self.active_pane else "")
+                if pane.pane == self.active_pane:
+                    pane.refresh_text(self._query, current=self._current_line())
+                else:
+                    pane.refresh_text()
 
     def watch_structural_diff(self, structural: bool) -> None:
         """Rebuild the Passes pane when the diff mode is toggled.
@@ -518,12 +560,19 @@ class JaxplorerApp(App[None]):
     def _apply_query(self, query: str) -> None:
         self._query = query
         pane = self.query_one(f"#pane-{self.active_pane}", OutputPane)
-        pane.refresh_text(query)
+        # Matches first, so the render knows which hit to emphasise.
         self._matches = pane.match_lines(query)
         self._match = 0
+        pane.refresh_text(query, current=self._current_line())
         if self._matches:
             self._scroll_to_match(pane)
         self._report_matches()
+
+    def _current_line(self) -> int | None:
+        """Displayed line index of the hit being visited, if there is one."""
+        if not self._matches:
+            return None
+        return self._matches[self._match]
 
     def _scroll_to_match(self, pane: OutputPane) -> None:
         # A little context above the hit rather than pinning it to the top edge.
@@ -540,7 +589,10 @@ class JaxplorerApp(App[None]):
         if not self._matches:
             return
         self._match = (self._match + delta) % len(self._matches)
-        self._scroll_to_match(self.query_one(f"#pane-{self.active_pane}", OutputPane))
+        pane = self.query_one(f"#pane-{self.active_pane}", OutputPane)
+        # Re-render so the emphasis moves with the cursor, not just the scroll position.
+        pane.refresh_text(self._query, current=self._current_line())
+        self._scroll_to_match(pane)
         self._report_matches()
 
     def action_next_match(self) -> None:
