@@ -102,6 +102,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="(cpu|gpu|tpu)",
         help="JAX platform to compile for; defaults to JAX's own choice.",
     )
+    parser.add_argument(
+        "--python",
+        metavar="<path>",
+        help="Interpreter to compile with, e.g. a project's .venv/bin/python. Lets one "
+        "installed jaxplorer inspect whichever jax that environment has, instead of the "
+        "one it was installed with.",
+    )
     parser.add_argument("--x64", action="store_true", help="enable 64-bit values")
     parser.add_argument(
         "--stages",
@@ -149,6 +156,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--watch needs a FILE to watch")
     if args.file is not None and not args.file.is_file():
         parser.error(f"no such file: {args.file}")
+    if args.python is not None and not os.access(args.python, os.X_OK):
+        parser.error(f"not an executable interpreter: {args.python}")
 
     # Imported late so that --help stays instant.
     from jaxplorer.app import JaxplorerApp
@@ -161,6 +170,7 @@ def main(argv: list[str] | None = None) -> int:
         stages=args.stages,
         passes=args.passes,
         timeout=args.timeout,
+        executable=args.python,
     ).run()
     return 0
 

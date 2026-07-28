@@ -224,6 +224,9 @@ class JaxplorerApp(App[None]):
         Whether to collect per-pass HLO and LLVM IR from the first compile.
     timeout : float, optional
         Seconds to allow one compile.
+    executable : str, optional
+        Interpreter to run the worker under, so the jax being inspected can come from a
+        project's virtualenv rather than jaxplorer's own environment.
 
     Attributes
     ----------
@@ -286,11 +289,14 @@ class JaxplorerApp(App[None]):
         stages: list[Stage] | None = None,
         passes: bool = False,
         timeout: float = 20.0,
+        executable: str | None = None,
     ) -> None:
         super().__init__()
         self.path = path
         self.watch_mode = watch and path is not None
-        self.session = WorkerSession(platform=platform, x64=x64, timeout=timeout)
+        self.session = WorkerSession(
+            platform=platform, x64=x64, timeout=timeout, executable=executable
+        )
         self.stages = list(stages) if stages else list(ALL_STAGES)
         self.collect_passes = passes
         if source is None:
@@ -615,7 +621,11 @@ class JaxplorerApp(App[None]):
             self._show("llvm_ir", result.llvm_ir or _NO_LLVM_IR)
 
         errors = result.errors()
-        self._show("errors", "\n\n".join(errors) if errors else "No errors.")
+        # A jax too old for a feature (notably click-to-source) is a warning, not a failure.
+        warning = self.session.info.warning if self.session.info else None
+        notes = [f"[environment]\n{warning}"] if warning else []
+        shown = errors + notes
+        self._show("errors", "\n\n".join(shown) if shown else "No errors.")
         self._mark_tab("errors", failed=bool(errors))
 
         if result.fatal:

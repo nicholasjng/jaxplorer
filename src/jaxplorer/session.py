@@ -13,15 +13,56 @@ import sys
 from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 
 from jaxplorer.protocol import CompileRequest, CompileResult, Stage
 
+# Bootstrap for the worker. `append`, never `insert`, so that a foreign interpreter resolves
+# jax and everything else from its own environment and only falls back to ours for jaxplorer
+# itself.
+_BOOTSTRAP = (
+    "import sys; sys.path.append({path!r});"
+    " from jaxplorer.worker import main; raise SystemExit(main())"
+)
+
 DEFAULT_TIMEOUT = 20.0
+WORKER_INTERPRETER = "python.exe" if sys.platform == "win32" else "python"
 # Booting JAX and warming a backend is far slower than any single compile.
 STARTUP_TIMEOUT = 90.0
 STDERR_TAIL_LINES = 40
 # Only stderr is read by line; a single XLA log line can still be long.
 STREAM_LIMIT = 4 * 1024 * 1024
+
+
+def resolve_interpreter(explicit: str | None = None) -> str:
+    """Pick the interpreter the worker should run under.
+
+    ``--python`` wins, then an active virtualenv, then the interpreter running jaxplorer.
+    The middle rule is what makes a tool install useful: `uv run` and a plain `activate`
+    both export ``VIRTUAL_ENV``, so a jaxplorer installed with `uv tool install` inspects
+    the project you are standing in rather than the jax it shipped with. When jaxplorer is
+    itself installed in that virtualenv the two agree, and this changes nothing.
+
+    Parameters
+    ----------
+    explicit : str, optional
+        Value of ``--python``, used as-is when given.
+
+    Returns
+    -------
+    str
+        Path to a Python interpreter.
+    """
+    if explicit:
+        return explicit
+    active = os.environ.get("VIRTUAL_ENV")
+    if active:
+        candidate = Path(active) / ("Scripts" if sys.platform == "win32" else "bin")
+        candidate /= WORKER_INTERPRETER
+        # Ignore a stale or half-built VIRTUAL_ENV rather than failing to start at all.
+        if candidate.is_file():
+            return str(candidate)
+    return sys.executable
 
 
 class ProtocolError(RuntimeError):
@@ -40,11 +81,15 @@ class WorkerInfo:
         Backend JAX actually chose, which need not be the one that was requested.
     devices : tuple of str
         Devices that backend exposes.
+    warning : str or None
+        Something about the environment worth surfacing, e.g. a jax too old for
+        click-to-source.
     """
 
     jax_version: str
     platform: str
     devices: tuple[str, ...]
+    warning: str | None = None
 
     def summary(self) -> str:
         """Return a one-line description for the status bar."""
@@ -66,6 +111,9 @@ class WorkerSession:
         Whether to set ``JAX_ENABLE_X64``.
     timeout : float, optional
         Seconds to wait for one compile before killing the worker.
+    executable : str, optional
+        Interpreter to run the worker under. Defaults to :func:`resolve_interpreter`, which
+        prefers an active virtualenv over jaxplorer's own environment.
 
     Attributes
     ----------
@@ -79,10 +127,12 @@ class WorkerSession:
         platform: str | None = None,
         x64: bool = False,
         timeout: float = DEFAULT_TIMEOUT,
+        executable: str | None = None,
     ) -> None:
         self.platform = platform
         self.x64 = x64
         self.timeout = timeout
+        self.executable = resolve_interpreter(executable)
         self.info: WorkerInfo | None = None
 
         self._process: asyncio.subprocess.Process | None = None
@@ -129,9 +179,9 @@ class WorkerSession:
 
         self._stderr.clear()
         process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "jaxplorer.worker",
+            self.executable,
+            "-c",
+            _BOOTSTRAP.format(path=str(Path(__file__).parent.parent)),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -178,6 +228,7 @@ class WorkerSession:
             jax_version=str(handshake.get("jax_version", "?")),
             platform=str(handshake.get("platform", "?")),
             devices=tuple(handshake.get("devices") or ()),
+            warning=handshake.get("warning"),
         )
         return self.info
 

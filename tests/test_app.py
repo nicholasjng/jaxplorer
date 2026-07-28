@@ -1,6 +1,7 @@
 """TUI tests driven through Textual's pilot."""
 
 import asyncio
+from dataclasses import replace
 
 from textual.widgets import Input, Static, TabbedContent, Tabs, TextArea
 
@@ -533,3 +534,21 @@ async def test_save_is_refused_in_watch_mode(tmp_path, snippet):
         await pilot.pause()
 
         assert path.read_text() == snippet
+
+
+async def test_an_old_jax_is_reported_without_counting_as_an_error(snippet):
+    app = make_app(snippet)
+    async with app.run_test() as pilot:
+        result = await settle(app, pilot=pilot)
+
+        # As if the interpreter behind --python carried a jax below the floor.
+        assert app.session.info is not None
+        app.session.info = replace(app.session.info, warning="jax 0.8.0 is older than …")
+        app._render(result)
+        await pilot.pause()
+
+        assert "[environment]" in pane_text(app, "errors")
+        # A warning is not a failure: it must not flag the tab or inflate the count.
+        assert "●" not in str(app.query_one(TabbedContent).get_tab("errors").label)
+        assert "ok" in status_text(app)
+        assert "error(s)" not in status_text(app)

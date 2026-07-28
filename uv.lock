@@ -79,12 +79,17 @@ wheels = [
 name = "jaxplorer"
 source = { editable = "." }
 dependencies = [
-    { name = "jax" },
     { name = "textual" },
+]
+
+[package.optional-dependencies]
+jax = [
+    { name = "jax" },
 ]
 
 [package.dev-dependencies]
 test = [
+    { name = "jaxplorer", extra = ["jax"] },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
@@ -94,12 +99,14 @@ typing = [
 
 [package.metadata]
 requires-dist = [
-    { name = "jax", specifier = ">=0.9" },
+    { name = "jax", marker = "extra == 'jax'", specifier = ">=0.9" },
     { name = "textual", specifier = ">=6.0" },
 ]
+provides-extras = ["jax"]
 
 [package.metadata.requires-dev]
 test = [
+    { name = "jaxplorer", extras = ["jax"] },
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
 ]

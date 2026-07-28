@@ -389,6 +389,26 @@ def _handle(request: CompileRequest, dumps: Path | None) -> CompileResult:
     return result
 
 
+# Below this, jax emits no HLO stack-frame tables and click-to-source silently finds
+# nothing. Checked here rather than in the UI because only the worker imports jax, and with
+# --python that jax is not the one jaxplorer was installed with.
+MIN_JAX = (0, 9)
+
+
+def _version_warning(version: str) -> str | None:
+    try:
+        parts = tuple(int(p) for p in version.split(".")[:2])
+    except ValueError:
+        return None
+    if parts >= MIN_JAX:
+        return None
+    floor = ".".join(str(p) for p in MIN_JAX)
+    return (
+        f"jax {version} is older than the oldest fully supported version {floor}: "
+        "click-to-source will not work, since this version emits no HLO stack-frame tables."
+    )
+
+
 def _ready_message() -> str:
     import jax
 
@@ -398,6 +418,7 @@ def _ready_message() -> str:
             "jax_version": jax.__version__,
             "platform": jax.default_backend(),
             "devices": [str(d) for d in jax.devices()],
+            "warning": _version_warning(jax.__version__),
         }
     )
 
@@ -415,6 +436,19 @@ def main() -> int:
         # failure rather than a mystery hang.
         try:
             ready = _ready_message()
+        except ModuleNotFoundError as exc:
+            # The likeliest first run failure now that jax is an extra, so name the
+            # interpreter that lacks it and both ways out.
+            missing = (
+                f"{exc.name} is not installed in {sys.executable}.\n\n"
+                "Point --python at an environment that has jax, run jaxplorer from a "
+                "virtual env that has it, or give jaxplorer its own copy with "
+                "`uv tool install jaxplorer[jax]`."
+                if exc.name in ("jax", "jaxlib")
+                else str(exc)
+            )
+            channel.write(encode_frame(json.dumps({"ready": False, "error": missing})))
+            return 1
         except Exception as exc:  # noqa: BLE001 - report and give up cleanly
             channel.write(encode_frame(json.dumps({"ready": False, "error": str(exc)})))
             return 1

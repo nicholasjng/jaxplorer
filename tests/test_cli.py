@@ -100,3 +100,19 @@ def test_the_console_script_rejects_a_bad_file():
 
     assert done.returncode == 2
     assert "no such file" in done.stderr
+
+
+def test_python_flag_is_parsed():
+    args = build_parser().parse_args(["--python", sys.executable])
+
+    assert args.python == sys.executable
+
+
+def test_a_non_executable_interpreter_is_rejected(capsys, tmp_path):
+    not_exec = tmp_path / "notpython"
+    not_exec.write_text("")
+
+    with pytest.raises(SystemExit):
+        main(["--python", str(not_exec)])
+
+    assert "not an executable interpreter" in capsys.readouterr().err

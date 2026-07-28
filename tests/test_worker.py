@@ -4,7 +4,7 @@ import pathlib
 
 from conftest import fatal, stage_error, stage_text
 from jaxplorer.protocol import ALL_STAGES, CompileRequest, CompileResult
-from jaxplorer.worker import handle
+from jaxplorer.worker import _version_warning, handle
 
 
 def run(source: str, **kwargs) -> CompileResult:
@@ -231,3 +231,19 @@ def test_namespace_does_not_leak_between_requests():
     second = run("def f(x):\n    return leaked\nargs = (1.0,)\n")
     assert second.stages["jaxpr"].error is not None
     assert "NameError" in stage_error(second, "jaxpr")
+
+
+def test_the_version_guard_fires_only_below_the_floor():
+    # The floor is where the HLO stack-frame tables start existing, so below it
+    # click-to-source silently finds nothing and the user deserves to be told.
+    old = _version_warning("0.8.0")
+    assert old is not None
+    assert "click-to-source" in old
+    assert _version_warning("0.6.2") is not None
+
+    assert _version_warning("0.9.0") is None
+    assert _version_warning("0.9.2") is None
+    assert _version_warning("0.11.0") is None
+    assert _version_warning("1.0.0") is None
+    # An unparseable version is not worth guessing about.
+    assert _version_warning("nightly") is None

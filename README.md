@@ -15,13 +15,16 @@ StableHLO and optimized HLO on the right, and see all three change as you type.
 ## Installation
 
 ```bash
-uv sync
+uv sync                             # in a checkout
+uv tool install "jaxplorer[jax]"    # standalone, with its own jax
+uv tool install jaxplorer           # standalone, borrowing a project's jax (see below)
 ```
 
-Needs Python 3.12 or newer, `jax >= 0.9` and `textual >= 6.0`.
+Needs Python 3.12+ and `textual >= 6.0`.
+`jax >= 0.9` is an extra, since the jax worth inspecting is usually a project's own.
 Any CPU-only jax install is enough; a GPU or TPU backend is only needed to compile for one.
 
-## Use
+## Usage
 
 ```bash
 uv run jaxplorer                      # scratch buffer
@@ -46,9 +49,24 @@ uv run jaxplorer examples/mlp.py --watch   # keep editing in your own editor; ja
 
 Click any HLO instruction to select the source line that produced it.
 
-Other options: `--platform cpu|gpu|tpu`, `--x64`, `--timeout SECONDS`,
+Other options: `--python PATH` (compile under another environment's jax, see below),
+`--platform cpu|gpu|tpu`, `--x64`, `--timeout SECONDS`,
 `--stages jaxpr,stablehlo,...` (stopping before `optimized_hlo` skips XLA, which is much
 faster on a large model), and `--passes` to collect per-pass HLO and LLVM IR from the start.
+
+## Against your own project's jax
+
+jaxplorer compiles in a subprocess, and that subprocess can be your project's interpreter:
+
+```bash
+cd my-project
+uv run jaxplorer model.py                     # lookup via uv (VIRTUAL_ENV)
+jaxplorer model.py --python .venv/bin/python   # or name the interpreter outright.
+```
+
+The interpreter is chosen in this order: `--python`, then `$VIRTUAL_ENV`, then the one running
+jaxplorer. `uv run` and a plain `activate` both export `VIRTUAL_ENV`, so inside a project the
+flag is rarely needed.
 
 ## Anatomy of a snippet
 

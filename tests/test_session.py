@@ -1,10 +1,11 @@
 """Session tests: these spawn real worker subprocesses, so they are the slow ones."""
 
 import asyncio
+import sys
 
 import pytest
 
-from jaxplorer.session import WorkerSession
+from jaxplorer.session import WorkerSession, WorkerStartupError, resolve_interpreter
 
 HANGS = "import jax\nwhile True:\n    pass\n"
 
@@ -138,3 +139,44 @@ async def test_unavailable_platform_fails_to_start():
         assert result.fatal
     finally:
         await session.close()
+
+
+async def test_the_worker_runs_under_this_interpreter_by_default():
+    session = WorkerSession(platform="cpu")
+
+    assert session.executable == sys.executable
+
+
+async def test_a_bogus_interpreter_is_reported_rather_than_hanging(snippet):
+    session = WorkerSession(platform="cpu", executable="/nonexistent/python")
+    try:
+        with pytest.raises((WorkerStartupError, FileNotFoundError, OSError)):
+            await session.start()
+    finally:
+        await session.close()
+
+
+def test_an_active_virtualenv_is_preferred_over_our_own_interpreter(tmp_path, monkeypatch):
+    # What makes `uv tool install jaxplorer` useful: uv run and plain activate both export
+    # VIRTUAL_ENV, so the worker lands in the project the user is standing in.
+    venv = tmp_path / ".venv"
+    (venv / "bin").mkdir(parents=True)
+    interpreter = venv / "bin" / "python"
+    interpreter.touch()
+    monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+
+    assert resolve_interpreter() == str(interpreter)
+    # An explicit --python still wins.
+    assert resolve_interpreter("/somewhere/python") == "/somewhere/python"
+
+
+def test_a_stale_virtualenv_falls_back_rather_than_failing(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "deleted"))
+
+    assert resolve_interpreter() == sys.executable
+
+
+def test_without_a_virtualenv_the_running_interpreter_is_used(monkeypatch):
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+
+    assert resolve_interpreter() == sys.executable

@@ -25,11 +25,11 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    # Hard floors: jax 0.8 and older emit no HLO stack-frame tables, so click-to-source silently finds nothing;
-    # textual 5 and older lack Static.content, which the tests read to assert what a pane displays.
-    "jax>=0.9",
     "textual>=6.0",
 ]
+
+[project.optional-dependencies]
+jax = ["jax>=0.9"]
 
 [project.urls]
 Repository = "https://github.com/nicholasjng/jaxplorer"
@@ -40,6 +40,7 @@ jaxplorer = "jaxplorer.cli:main"
 
 [dependency-groups]
 test = [
+    "jaxplorer[jax]",
     "pytest>=8",
     "pytest-asyncio>=0.24",
 ]
