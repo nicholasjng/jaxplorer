@@ -69,7 +69,7 @@ def test_missing_file_is_rejected(capsys):
 
     error = capsys.readouterr().err
     assert "no such file" in error
-    # And it says what names would have worked, since a bare name is a valid way in.
+    # A bare name is a valid way in, so say which ones exist.
     assert "bundled examples" in error
 
 
@@ -82,8 +82,8 @@ def test_version_is_reported(capsys):
 
 
 def test_the_bundled_examples_are_reachable_from_the_package():
-    # v0.1.0 shipped none of these while the README told users to open examples/mlp.py, so
-    # this asserts on importlib.resources rather than on a path relative to the repo.
+    # Asserted through importlib.resources, not a repo-relative path: an install has no
+    # examples/ directory beside it.
     assert "mlp" in examples.names()
     assert examples.load("mlp") == examples.load("mlp.py")
     source = examples.load("mlp")
@@ -93,7 +93,7 @@ def test_the_bundled_examples_are_reachable_from_the_package():
 
 
 def test_a_bundled_example_name_is_accepted_in_place_of_a_path(monkeypatch, tmp_path, capsys):
-    # From a directory with no examples/ in it, which is every installed user's situation.
+    # From a directory with no examples/ in it, as any installed user is.
     monkeypatch.chdir(tmp_path)
 
     assert main(["mlp", "--print", "jaxpr", "--platform", "cpu"]) == 0
@@ -126,8 +126,7 @@ def test_print_writes_one_pane_to_stdout(capsys, pane, needle):
 
 
 def test_print_implies_the_stage_it_needs(capsys):
-    # --stages now stops the chain, so printing a pane outside it has to widen the request
-    # rather than come back empty.
+    # --stages stops the chain, so printing a pane outside it must widen the request.
     assert main(["mlp", "--print", "optimized_hlo", "--stages", "jaxpr", "--platform", "cpu"]) == 0
 
     assert "HloModule" in capsys.readouterr().out
@@ -171,7 +170,7 @@ def test_watching_and_printing_together_is_rejected(capsys, tmp_path):
 
 
 def test_listing_the_examples_costs_no_filesystem_walk_per_call():
-    # The names go into --help, so this must not scan the package every invocation.
+    # The names go into --help, which must not wait on a directory scan.
     assert examples.names() is examples.names()
 
 
