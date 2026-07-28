@@ -226,11 +226,13 @@ class CompileResult:
         Per-pass HLO snapshots, empty unless the request asked for them.
     llvm_ir : str or None
         LLVM IR from backends that emit it, absent unless the request asked for it.
+    startup_failed : bool
+        Whether ``fatal`` means the worker never came up, rather than the snippet failing in a
+        healthy one. Set by the session, since a worker cannot report its own failure to start,
+        so it never travels on the wire.
     stages_run : list of Stage
-        Stages that actually executed, which is not the same as the keys of ``stages``: the
-        chain stops after the last stage anyone asked for, so requesting only ``jaxpr``
-        genuinely skips XLA. Reported separately because ``stages`` holds what was *asked
-        for*, and the difference is the only way to see the work that was avoided.
+        Stages that actually executed. Not the keys of ``stages``, which are what was *asked
+        for*: the chain stops after the last of those, and the difference is the work skipped.
     """
 
     id: int
@@ -239,6 +241,7 @@ class CompileResult:
     total_ms: float = 0.0
     passes: list[PassSnapshot] = field(default_factory=list)
     llvm_ir: str | None = None
+    startup_failed: bool = False
     stages_run: list[Stage] = field(default_factory=list)
 
     def to_json(self) -> str:

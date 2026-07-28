@@ -18,7 +18,7 @@ import sys
 import tempfile
 import time
 import traceback
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,13 @@ from jaxplorer.protocol import (
 
 # Snippet globals that configure the jit wrapper rather than describing the call.
 JIT_OPTION_NAMES = ("static_argnums", "static_argnames", "donate_argnums")
+
+# Dump directories are named "<prefix><pid>-<random>" so an abandoned one can be recognised.
+DUMP_PREFIX = "jaxplorer-dump-"
+
+# A dump directory older than this belongs to nobody: it is written during one compile, and no
+# compile takes an hour.
+DUMP_MAX_AGE = 3600.0
 
 
 class ContractError(Exception):
@@ -174,13 +181,47 @@ def _dump_dir():
     """Yield a scratch directory for one compile's XLA dumps, then delete it.
 
     Per request rather than per session, because the dumps of a 60 layer model are tens of
-    MB and only the newest compile is ever displayed.
+    MB and only the newest compile is ever displayed. The owning pid is in the name so the
+    session can reclaim them if it has to kill this worker.
     """
-    directory = Path(tempfile.mkdtemp(prefix="jaxplorer-dump-"))
+    directory = Path(tempfile.mkdtemp(prefix=f"{DUMP_PREFIX}{os.getpid()}-"))
     try:
         yield directory
     finally:
         shutil.rmtree(directory, ignore_errors=True)
+
+
+def dump_dirs(pid: int | None = None) -> list[Path]:
+    """Dump directories in the temp dir, all of them or just one worker's.
+
+    Shared with the session, which reclaims a worker's dumps when it kills it — the worker
+    cannot, since :func:`_dump_dir` cleans up in a ``finally`` and SIGKILL runs none.
+    """
+    return list(Path(tempfile.gettempdir()).glob(f"{DUMP_PREFIX}{'' if pid is None else pid}*"))
+
+
+def sweep_stale_dumps() -> int:
+    """Delete dump directories too old to belong to any live compile, and return how many.
+
+    The backstop, not the main mechanism: the session reclaims a worker's dumps when it kills
+    it. This covers what no such handover can, chiefly jaxplorer itself dying.
+
+    Returns
+    -------
+    int
+        Number of directories removed.
+    """
+    swept = 0
+    now = time.time()
+    for path in dump_dirs():
+        try:
+            stale = now - path.stat().st_mtime >= DUMP_MAX_AGE
+        except OSError:  # vanished under us, or unreadable; either way not ours to clean
+            continue
+        if stale:
+            shutil.rmtree(path, ignore_errors=True)
+            swept += 1
+    return swept
 
 
 def _dump_options(directory: Path) -> dict[str, Any]:
@@ -329,9 +370,9 @@ def _handle(request: CompileRequest, dumps: Path | None) -> CompileResult:
         result.total_ms = (time.perf_counter() - started) * 1000
         return result
 
-    # Each stage consumes the previous one's output, so the chain always runs in order, and it
-    # runs only as far as anyone needs: see `last` below. A failure keeps earlier results, since
-    # a valid jaxpr beside a lowering error is the signal the user is after.
+    # Each stage consumes the previous one's output, so the chain runs in order and only as far
+    # as anyone needs (see `last` below). A failure keeps earlier results, since a valid jaxpr
+    # beside a lowering error is the signal the user is after.
     def do_jaxpr(_prev: Any) -> tuple[Any, str]:
         traced = _jit(f, jit_opts).trace(*args, **kwargs)
         return traced, str(traced.jaxpr)
@@ -361,13 +402,12 @@ def _handle(request: CompileRequest, dumps: Path | None) -> CompileResult:
         ("analysis", do_analysis),
     ]
 
-    # Stop after the last stage anyone asked for. A mid-chain gap is not a gap: `wanted` comes
-    # from ALL_STAGES (above), so --stages jaxpr,analysis still runs lowering and XLA on the way
-    # to analysis. Requesting only jaxpr, though, genuinely skips XLA, which is 66-92% of a
-    # compile on anything sizeable.
+    # Stop after the last stage anyone asked for, so leaving out optimized_hlo really skips XLA
+    # — most of a compile. A mid-chain gap is not a gap: `wanted` follows ALL_STAGES, so
+    # --stages jaxpr,analysis still lowers and compiles on the way to analysis.
     last = max((i for i, (stage, _) in enumerate(chain) if stage in wanted), default=-1)
     if dumps is not None:
-        # The Passes pane is not a stage, but the snapshots are collected inside
+        # The Passes pane is not a stage, but its snapshots are collected inside
         # do_optimized_hlo, so asking for passes has to reach it whatever --stages says.
         last = max(last, next(i for i, (stage, _) in enumerate(chain) if stage == "optimized_hlo"))
 
@@ -466,6 +506,10 @@ def main() -> int:
             channel.write(encode_frame(json.dumps({"ready": False, "error": str(exc)})))
             return 1
         channel.write(encode_frame(ready))
+        # After the handshake, so the TUI is not kept waiting on a glob of $TMPDIR. Failures
+        # are not worth reporting: leftover scratch files are not what the user asked about.
+        with suppress(Exception):
+            sweep_stale_dumps()
 
         while True:
             line = sys.stdin.readline()
