@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jaxplorer"
+version = "0.1.0"
+description = "A compiler explorer TUI for inspecting compiled JAX programs"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "jax>=0.6",
+    "textual>=1.0",
+]
+
+[project.scripts]
+jaxplorer = "jaxplorer.cli:main"
+
+[dependency-groups]
+test = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+]
+# Single source of truth for the ty version: CI, the CLI, and Zed's LSP all
+# resolve ty from the project .venv (see .zed/settings.json).
+typing = [
+    "ty>=0.0.42",
+]
+
+[tool.uv]
+default-groups = ["test", "typing"]
+# exclude dependency versions newer than one week
+exclude-newer = "1 week"
+# ...except the toolchain, which we want at the latest release.
+exclude-newer-package = { ruff = false, ty = false }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jaxplorer"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+src = ["src", "tests"]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+# Merge `from x import y` and `from x import z as z` into one statement
+# instead of leaving the aliased form on its own line.
+combine-as-imports = true
+
+[tool.ty.src]
+include = ["src", "tests"]
