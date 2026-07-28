@@ -226,6 +226,11 @@ class CompileResult:
         Per-pass HLO snapshots, empty unless the request asked for them.
     llvm_ir : str or None
         LLVM IR from backends that emit it, absent unless the request asked for it.
+    stages_run : list of Stage
+        Stages that actually executed, which is not the same as the keys of ``stages``: the
+        chain stops after the last stage anyone asked for, so requesting only ``jaxpr``
+        genuinely skips XLA. Reported separately because ``stages`` holds what was *asked
+        for*, and the difference is the only way to see the work that was avoided.
     """
 
     id: int
@@ -234,6 +239,7 @@ class CompileResult:
     total_ms: float = 0.0
     passes: list[PassSnapshot] = field(default_factory=list)
     llvm_ir: str | None = None
+    stages_run: list[Stage] = field(default_factory=list)
 
     def to_json(self) -> str:
         """Serialize this result for :func:`encode_frame`."""
@@ -244,6 +250,7 @@ class CompileResult:
                 "total_ms": self.total_ms,
                 "passes": [p.to_dict() for p in self.passes],
                 "llvm_ir": self.llvm_ir,
+                "stages_run": list(self.stages_run),
                 "stages": {
                     name: {
                         "text": r.text,
@@ -275,6 +282,7 @@ class CompileResult:
             total_ms=float(data.get("total_ms", 0.0)),
             passes=[PassSnapshot.from_dict(p) for p in (data.get("passes") or [])],
             llvm_ir=data.get("llvm_ir"),
+            stages_run=list(data.get("stages_run") or []),
             stages={
                 name: StageResult(
                     text=r.get("text"),

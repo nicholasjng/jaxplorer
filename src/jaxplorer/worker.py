@@ -329,9 +329,9 @@ def _handle(request: CompileRequest, dumps: Path | None) -> CompileResult:
         result.total_ms = (time.perf_counter() - started) * 1000
         return result
 
-    # Each stage consumes the previous one's output, so the chain always runs in order and
-    # `wanted` only decides what is reported. A failure keeps earlier results: a valid jaxpr
-    # beside a lowering error is the signal the user is after.
+    # Each stage consumes the previous one's output, so the chain always runs in order, and it
+    # runs only as far as anyone needs: see `last` below. A failure keeps earlier results, since
+    # a valid jaxpr beside a lowering error is the signal the user is after.
     def do_jaxpr(_prev: Any) -> tuple[Any, str]:
         traced = _jit(f, jit_opts).trace(*args, **kwargs)
         return traced, str(traced.jaxpr)
@@ -361,13 +361,26 @@ def _handle(request: CompileRequest, dumps: Path | None) -> CompileResult:
         ("analysis", do_analysis),
     ]
 
+    # Stop after the last stage anyone asked for. A mid-chain gap is not a gap: `wanted` comes
+    # from ALL_STAGES (above), so --stages jaxpr,analysis still runs lowering and XLA on the way
+    # to analysis. Requesting only jaxpr, though, genuinely skips XLA, which is 66-92% of a
+    # compile on anything sizeable.
+    last = max((i for i, (stage, _) in enumerate(chain) if stage in wanted), default=-1)
+    if dumps is not None:
+        # The Passes pane is not a stage, but the snapshots are collected inside
+        # do_optimized_hlo, so asking for passes has to reach it whatever --stages says.
+        last = max(last, next(i for i, (stage, _) in enumerate(chain) if stage == "optimized_hlo"))
+
     state: Any = None
     broken = False
-    for stage, run in chain:
+    for index, (stage, run) in enumerate(chain):
+        if index > last:
+            break
         if broken:
             if stage in wanted:
                 result.stages[stage] = StageResult(skipped=True)
             continue
+        result.stages_run.append(stage)
         begin = time.perf_counter()
         try:
             state, text = run(state)
