@@ -177,9 +177,8 @@ def test_an_edit_to_dead_code_is_reported_rather_than_swallowed():
 
 
 def test_hitting_a_work_cap_does_not_force_pairs_that_scoring_refused(monkeypatch):
-    # Truncation used to fall back to pairing leftovers by position whenever any cap fired,
-    # which overruled the pairs the scored pass had declined on merit. Only a cap that skips
-    # scoring outright may guess.
+    # Only a cap that skips scoring outright may guess positionally; otherwise it would
+    # overrule pairs the scored pass declined on merit.
     monkeypatch.setattr("jaxplorer.hlodiff.MAX_BUCKET", 1)
     unrelated = BEFORE.replace(
         "%tanh.1 = f32[4,4]{1,0} tanh(%x.1)", "%wholly.9 = s32[3]{0} iota(), iota_dimension=0"

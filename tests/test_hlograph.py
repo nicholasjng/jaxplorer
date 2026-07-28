@@ -203,7 +203,7 @@ ENTRY %main.2 (x.1: f32[4,4]) -> f32[] {
 
 
 def test_reordering_instructions_does_not_change_the_fingerprint():
-    # What a scheduling pass does. Defs no longer precede uses here, which is exactly why
+    # What a scheduling pass does. Defs no longer precede uses here, which is why
     # the hash walks operands instead of trusting printed order.
     assert fingerprint(parse_module(ENTRY)).module == fingerprint(parse_module(REORDERED)).module
 
@@ -215,9 +215,8 @@ def test_renumbering_instructions_does_not_change_the_fingerprint():
 
 
 def test_an_instruction_the_root_cannot_reach_still_counts():
-    # Between passes there is plenty of dead code: rewiring a use leaves the old producer
-    # unreferenced until DCE runs. Hashing only the root's subgraph made edits to those
-    # instructions invisible, which is a silent wrong answer rather than a rough one.
+    # Rewiring a use leaves the old producer unreferenced until DCE runs, so between passes
+    # there is plenty of dead code, and an edit to it is still an edit.
     with_dead = ENTRY.replace(
         "  ROOT %reduce.1", "  %dead = s32[7] iota(), iota_dimension=0\n  ROOT %reduce.1"
     )

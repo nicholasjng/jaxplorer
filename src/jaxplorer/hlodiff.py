@@ -1,16 +1,14 @@
 """Compare two HLO modules by graph structure instead of by line.
 
-A text diff of two pass snapshots answers "what changed in the printout", which is not the
-question. Scheduling reorders instructions without touching the DAG; a rewrite renames a
-computation and every instruction in it. Both read as large text diffs and neither is a large
-change. Matching the graphs first and reporting on the correspondence answers "what changed in
-the program".
+A text diff answers "what changed in the printout", which is not the question. Scheduling
+reorders instructions without touching the DAG; a rewrite renames a computation and everything
+in it. Both read as large text diffs and neither is a large change.
 
-This is a subset of what ``xla/hlo/tools/hlo_diff`` does, reimplemented over parsed text
-because that tool is an ``xla_cc_binary`` shipped in no jaxlib wheel. If you have an XLA
-checkout, prefer the real thing — it has the actual cost model and match provenance. This
-exists for everyone else, and it is deliberately conservative: when the parse looks unreliable
-:func:`structural_pass_report` declines rather than guessing, and the caller shows a text diff.
+A subset of what ``xla/hlo/tools/hlo_diff`` does, reimplemented over parsed text because that
+tool is an ``xla_cc_binary`` shipped in no jaxlib wheel. Prefer the real thing if you have an
+XLA checkout: it has the actual cost model and match provenance. This one is deliberately
+conservative — when the parse looks unreliable :func:`structural_pass_report` declines rather
+than guessing, and the caller falls back to a text diff.
 
 Pure text handling, so neither jax nor textual is needed.
 """
@@ -30,9 +28,8 @@ if TYPE_CHECKING:
 
 Change = Literal["opcode", "shape", "layout", "operands", "attributes", "called", "root"]
 
-# Same-opcode, same-shape instructions are matched pairwise, which is quadratic. Past this
-# many candidates in one bucket the pairing is done positionally and the result is flagged
-# truncated, so a pathological module degrades in quality rather than in responsiveness.
+# Matching same-opcode, same-shape instructions is quadratic, so a pathological module degrades
+# in match quality — flagged as truncated — rather than in responsiveness.
 MAX_BUCKET = 256
 MAX_PAIRS = 20_000
 
@@ -40,8 +37,7 @@ MAX_PAIRS = 20_000
 MIN_SIMILARITY = 0.4
 
 # Below this score, two instructions from different (opcode, shape, arity) buckets are two
-# different instructions rather than one changed one. Scores run to about 8.5, and a shared
-# name plus shared operands alone clears it comfortably.
+# instructions rather than one changed one. Scores run to about 8.5.
 MIN_SCORE = 3.0
 
 # A module whose text parses this badly is not worth diffing structurally.
@@ -331,9 +327,8 @@ def _score(
 ) -> float:
     """How likely two instructions are the same instruction, given what already matched.
 
-    Only positive evidence scores. Two instructions that merely both lack operands, both
-    lack a literal and both lack a parameter number have nothing in common, and rewarding
-    those agreements would pair arbitrary leaves with each other.
+    Only positive evidence scores: two instructions that merely both lack operands, a literal
+    and a parameter number have nothing in common, and rewarding that pairs arbitrary leaves.
     """
     total = 0.0
     if one.operands:
@@ -467,19 +462,17 @@ def _diff_computation(
         strict.extend((one, other) for other in others)
     greedy(strict, 0.0)
 
-    # Then across buckets, so that changing an instruction's shape or opcode reports it as
-    # changed rather than as one removal plus one addition. This needs a threshold: without
-    # the bucket vouching for them, only real similarity should pair two instructions. Note
-    # this pass sees everything the strict cap skipped, so hitting that cap costs a little
-    # matching quality but never a fair hearing.
+    # Then across buckets, so a changed shape or opcode reports as changed rather than as one
+    # removal plus one addition. Thresholded: with no bucket vouching for them, only real
+    # similarity should pair two instructions. Everything the strict cap skipped is seen here.
     rest_left = [one for one in spare_left if one.name not in taken_left]
     rest_right = [other for other in spare_right if other.name not in taken_right]
     if len(rest_left) * len(rest_right) <= MAX_PAIRS:
         greedy([(one, other) for one in rest_left for other in rest_right], MIN_SCORE)
     else:
-        # Only here has scoring been skipped outright, and only here is a positional guess
-        # better than reporting every leftover as both removed and added. Doing this whenever
-        # anything was truncated would overrule the pairs the scored pass declined on merit.
+        # Scoring was skipped outright, so a positional guess beats reporting every leftover as
+        # both removed and added. Only here: elsewhere it would overrule pairs that scoring
+        # declined on merit.
         truncated = True
         for one, other in zip(rest_left, rest_right, strict=False):
             taken_left.add(one.name)

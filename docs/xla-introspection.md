@@ -197,10 +197,8 @@ when layout is not what you are studying. Pointing both workers at one jaxplorer
 absolute paths out of those tables in the first place.
 
 **That list is specific to comparing two builds, and does not transfer to comparing two passes.**
-*Verified* on a 2-layer MLP's 21 per-pass snapshots: normalizing metadata, sharding and numbering
-suffixes moved the diff from 113 changed lines to 109 and left the count of changed transitions at
-4. Within one compile, naming is already consistent, so there is nothing line-local to strip. What
-does mislead a pass-to-pass text diff is reordering and cross-computation renaming, which no
+Within one compile the naming is already consistent, so there is nothing line-local left to strip.
+What misleads a pass-to-pass text diff is reordering and cross-computation renaming, which no
 line-based normalization can reach — hence the structural mode below.
 
 ### Better: let XLA do the diff
@@ -233,19 +231,15 @@ each snapshot's text into a graph (`jaxplorer.hlograph`) and matches the two gra
 (`jaxplorer.hlodiff`), which is a deliberately small subset of what upstream does — no cost model,
 no HTML output, no match provenance.
 
-What it buys, *verified* on the same 21-snapshot MLP pipeline: 3 changed transitions instead of 4,
-because `HLO_passes_after_scheduling` only reordered instructions, and 74 report lines instead of
-192, because a rewrite that replaces 12 instructions with 3 custom fusions reports as that rather
-than as 66 lines of text. Fingerprints ignore metadata, layout and numbering suffixes by default,
-and walk operands rather than trusting printed order, which is what makes a rescheduling pass
-report nothing at all.
+Fingerprints ignore metadata, layout and numbering suffixes, and walk operands rather than trusting
+printed order, so a rescheduling pass reports nothing at all and a rewrite reports the instructions
+it replaced instead of every line it moved.
 
-Text remains the default mode, for two reasons. For a local change — `algsimp` dropping four
-instructions, `fusion` adding one computation — the unified diff is the better view, because seeing
-which four lines went away beats a count of them. And without an XLA checkout there is no oracle to
-check the matcher against, so the text diff stays available as the view that cannot be wrong. The
-structural mode declines rather than guesses when a module does not parse cleanly, and the pane says
-so and shows a text diff instead.
+Text remains the default, for two reasons. For a local change the unified diff is the better view:
+seeing which four lines `algsimp` dropped beats a count of them. And without an XLA checkout there
+is no oracle to check the matcher against, so the text diff stays available as the view that cannot
+be wrong. When a module does not parse cleanly the structural mode declines rather than guessing,
+and the pane says so and shows a text diff instead.
 
 ## Traps
 

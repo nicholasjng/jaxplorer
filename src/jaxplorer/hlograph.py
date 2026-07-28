@@ -1,16 +1,13 @@
 """An HLO module, as a graph rather than as lines of text.
 
-XLA's own semantic diff lives in ``xla/hlo/tools/hlo_diff`` and takes a C++ ``HloModule``, so
-reaching it means building XLA with bazel. jaxplorer has the module's *text* instead, which is
-enough: XLA's printer puts one instruction per line and never nests computations, so a fusion
-body, a ``while`` body and a ``conditional`` branch are all printed as separate top-level
-computations referenced by name. That makes a line-oriented parser sufficient to recover the
-DAG, and the DAG is what a diff has to compare.
+Text is enough to recover the DAG a diff has to compare: XLA's printer puts one instruction per
+line and never nests computations, so a fusion body, a ``while`` body and a ``conditional``
+branch are all separate top-level computations referenced by name.
 
 Pure text handling, so neither jax nor textual is needed. Nothing here raises on malformed
-input: HLO text is a debug format with no stability guarantee, so a line we cannot read is
-counted in :attr:`Module.unparsed` and skipped. Callers decide whether the count is low enough
-to trust the result.
+input: HLO text is a debug format with no stability guarantee, so an unreadable line is counted
+in :attr:`Module.unparsed` and skipped, and callers decide whether the count is low enough to
+trust the result.
 """
 
 from __future__ import annotations
@@ -712,11 +709,9 @@ def fingerprint(module: Module, *, options: Options | None = None) -> Fingerprin
         signature = (
             len(computation.parameters) if options.ignore_shape else computation.parameter_shapes
         )
-        # Every instruction's hash, not just the root's: an instruction the root does not
-        # reach is still part of the computation, and between passes there are plenty of them
-        # — a pass that rewires a use leaves the old producer dead until DCE runs. Hashing
-        # only the root subgraph made an edit to such an instruction invisible. Sorted, so
-        # that reordering the lines still changes nothing.
+        # Every instruction's hash, not just the root's: a pass that rewires a use leaves the
+        # old producer unreachable until DCE runs, and an edit to it still counts. Sorted, so
+        # reordering the lines changes nothing.
         prints.computation[computation.name] = _digest(
             local.get(computation.root, ""),
             tuple(sorted(local.values())),
