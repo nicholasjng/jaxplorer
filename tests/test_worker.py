@@ -1,13 +1,22 @@
 """Worker tests: the compile chain and, more importantly, how it reports failure."""
 
 import json
+import os
 import pathlib
+import tempfile
 
 from conftest import fatal, stage_error, stage_text
 from jaxplorer.hlo import pass_report
 from jaxplorer.hlograph import parse_module
 from jaxplorer.protocol import ALL_STAGES, CompileRequest, CompileResult
-from jaxplorer.worker import _version_warning, handle
+from jaxplorer.worker import (
+    DUMP_PREFIX,
+    _dump_dir,
+    _version_warning,
+    dump_dirs,
+    handle,
+    sweep_stale_dumps,
+)
 
 
 def run(source: str, **kwargs) -> CompileResult:
@@ -188,8 +197,7 @@ def test_stage_subset_only_reports_requested_stages(snippet):
 
 def test_a_stage_subset_stops_the_chain_instead_of_only_hiding_the_rest(snippet):
     # The point of --stages: XLA is most of a compile, so not asking for optimized_hlo has to
-    # mean not running it. Reporting the subset while still compiling would be a lie the
-    # timings could not show.
+    # mean not running it.
     result = handle(CompileRequest(id=1, source=snippet, stages=["jaxpr", "stablehlo"]))
 
     assert result.stages_run == ["jaxpr", "stablehlo"]
@@ -215,7 +223,7 @@ def test_asking_for_passes_reaches_xla_whatever_the_stage_subset_says(snippet):
 
 
 def test_a_full_run_reports_every_stage_as_run(snippet):
-    # So the status line only says "ran n/4" when something really was skipped.
+    # So the status line only says "ran n/4" when something was skipped.
     assert run(snippet).stages_run == list(ALL_STAGES)
 
 
@@ -249,9 +257,8 @@ def test_pass_snapshots_and_llvm_ir_are_collected_on_request(snippet):
 
 
 def test_every_real_pass_snapshot_parses_as_a_graph(snippet):
-    # The guard against XLA's printer drifting away from what hlograph can read. The parser
-    # counts unreadable lines instead of raising precisely so this can be asserted, and a
-    # failure here is the signal to fix the parser before trusting a structural diff.
+    # The guard against XLA's printer drifting away from what hlograph can read; a failure
+    # here means fixing the parser before trusting a structural diff.
     result = handle(CompileRequest(id=1, source=snippet, passes=True))
 
     modules = [parse_module(snapshot.text) for snapshot in result.passes]
@@ -272,6 +279,47 @@ def test_a_structural_pass_report_survives_a_real_pipeline(snippet):
     assert "pipeline order" in report
 
 
+def test_a_dump_directory_is_named_after_the_worker_that_owns_it():
+    # The pid is what lets an abandoned directory be told from a live worker's.
+    with _dump_dir() as directory:
+        assert directory.name.startswith(f"{DUMP_PREFIX}{os.getpid()}-")
+
+
+def test_sweeping_removes_dumps_too_old_to_belong_to_anyone(tmp_path, monkeypatch):
+    # The backstop for what no handover can cover: jaxplorer itself dying, or a directory
+    # written by a version that named them differently. A compile lasts seconds.
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    stale = tmp_path / f"{DUMP_PREFIX}{os.getpid()}-old"
+    stale.mkdir()
+    (stale / "module_0000.jit_f.txt").write_text("dumped")
+    os.utime(stale, (0, 0))
+    fresh = tmp_path / f"{DUMP_PREFIX}{os.getpid()}-new"
+    fresh.mkdir()
+
+    assert sweep_stale_dumps() == 1
+
+    assert not stale.exists()
+    assert fresh.exists(), "a compile in flight must keep its dumps"
+
+
+def test_dump_dirs_can_be_narrowed_to_one_worker(tmp_path, monkeypatch):
+    # What the session uses to reclaim the dumps of the worker it just killed.
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    mine = tmp_path / f"{DUMP_PREFIX}{os.getpid()}-abcd"
+    mine.mkdir()
+    other = tmp_path / f"{DUMP_PREFIX}{os.getpid() + 1}-efgh"
+    other.mkdir()
+
+    assert dump_dirs(os.getpid()) == [mine]
+    assert sorted(dump_dirs()) == sorted([mine, other])
+
+
+def test_sweeping_an_empty_temp_directory_is_harmless(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+
+    assert sweep_stale_dumps() == 0
+
+
 def test_no_dumps_are_collected_unless_asked(snippet):
     result = handle(CompileRequest(id=1, source=snippet))
 
@@ -280,11 +328,9 @@ def test_no_dumps_are_collected_unless_asked(snippet):
 
 
 def test_the_dump_directory_does_not_outlive_the_request(snippet, tmp_path):
-    import tempfile
-
-    before = set(pathlib.Path(tempfile.gettempdir()).glob("jaxplorer-dump-*"))
+    before = set(pathlib.Path(tempfile.gettempdir()).glob(f"{DUMP_PREFIX}*"))
     handle(CompileRequest(id=1, source=snippet, passes=True))
-    after = set(pathlib.Path(tempfile.gettempdir()).glob("jaxplorer-dump-*"))
+    after = set(pathlib.Path(tempfile.gettempdir()).glob(f"{DUMP_PREFIX}*"))
 
     # Dumps of a large model are tens of MB; leaking one per keystroke would be rough.
     assert after == before

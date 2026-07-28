@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import sys
 from collections import deque
 from contextlib import suppress
@@ -16,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from jaxplorer.protocol import CompileRequest, CompileResult, Stage
+from jaxplorer.worker import dump_dirs
 
 # Bootstrap for the worker. `append`, never `insert`, so that a foreign interpreter resolves
 # jax and everything else from its own environment and only falls back to ours for jaxplorer
@@ -178,16 +180,24 @@ class WorkerSession:
             await self._kill()
 
         self._stderr.clear()
-        process = await asyncio.create_subprocess_exec(
-            self.executable,
-            "-c",
-            _BOOTSTRAP.format(path=str(Path(__file__).parent.parent)),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=self._env(),
-            limit=STREAM_LIMIT,
-        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                self.executable,
+                "-c",
+                _BOOTSTRAP.format(path=str(Path(__file__).parent.parent)),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=self._env(),
+                limit=STREAM_LIMIT,
+            )
+        except OSError as exc:
+            # --python is validated with os.access(X_OK), which a directory passes. Reported as
+            # a startup error like every other way of not coming up, so callers need one handler.
+            raise WorkerStartupError(
+                f"could not run {self.executable} as a worker: {exc.strerror or exc}\n\n"
+                "--python takes a Python interpreter, e.g. a project's .venv/bin/python."
+            ) from exc
         self._process = process
         self._stderr_task = asyncio.create_task(self._drain_stderr(process))
 
@@ -294,6 +304,10 @@ class WorkerSession:
             # A killed process that will not be reaped is not worth blocking the UI for.
             with suppress(TimeoutError):
                 await asyncio.wait_for(process.wait(), timeout=5.0)
+            # SIGKILL runs no `finally`, so the worker cannot clean up the dumps of the compile
+            # it was in the middle of. Here is the only place that knows the pid it just killed.
+            for directory in dump_dirs(process.pid):
+                shutil.rmtree(directory, ignore_errors=True)
         if task is not None:
             task.cancel()
 
@@ -364,7 +378,9 @@ class WorkerSession:
             try:
                 await self.start()
             except WorkerStartupError as exc:
-                return CompileResult(id=request_id, fatal=str(exc))
+                # Flagged, not just described: a fatal alone cannot say whether the worker ran,
+                # and the app blames the backend for this and only this.
+                return CompileResult(id=request_id, fatal=str(exc), startup_failed=True)
             request = CompileRequest(
                 id=request_id,
                 source=source,

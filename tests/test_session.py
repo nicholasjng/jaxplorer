@@ -1,11 +1,15 @@
 """Session tests: these spawn real worker subprocesses, so they are the slow ones."""
 
 import asyncio
+import shutil
 import sys
+import tempfile
+from pathlib import Path
 
 import pytest
 
 from jaxplorer.session import WorkerSession, WorkerStartupError, resolve_interpreter
+from jaxplorer.worker import DUMP_PREFIX
 
 HANGS = "import jax\nwhile True:\n    pass\n"
 
@@ -152,6 +156,41 @@ async def test_a_bogus_interpreter_is_reported_rather_than_hanging(snippet):
     try:
         with pytest.raises((WorkerStartupError, FileNotFoundError, OSError)):
             await session.start()
+    finally:
+        await session.close()
+
+
+async def test_killing_a_worker_reclaims_the_dumps_it_was_writing(snippet):
+    # SIGKILL runs no `finally`, so the worker cannot clean up after itself. The session can:
+    # it is the one holding the pid it just killed.
+    session = WorkerSession(platform="cpu")
+    try:
+        await session.start()
+        assert session._process is not None
+        leaked = Path(tempfile.gettempdir()) / f"{DUMP_PREFIX}{session._process.pid}-pretend"
+        leaked.mkdir()
+        (leaked / "module_0000.jit_f.txt").write_text("tens of MB, in principle")
+
+        await session._kill()
+
+        assert not leaked.exists()
+    finally:
+        shutil.rmtree(leaked, ignore_errors=True)
+        await session.close()
+
+
+async def test_an_unusable_interpreter_comes_back_as_a_fatal_not_an_exception(snippet, tmp_path):
+    # --python is validated with os.access(X_OK), which a directory passes, so this reaches
+    # the subprocess and fails there. compile() has to turn that into something the Errors
+    # pane can show; the app's fallback would only print the OSError's repr.
+    session = WorkerSession(platform="cpu", executable=str(tmp_path))
+    try:
+        result = await session.compile(snippet)
+
+        assert result is not None
+        assert result.fatal is not None
+        assert str(tmp_path) in result.fatal
+        assert "--python" in result.fatal
     finally:
         await session.close()
 
