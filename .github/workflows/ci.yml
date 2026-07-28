@@ -1,4 +1,4 @@
-name: CI
+name: jaxplorer continuous integration checks
 
 on:
   push:
