@@ -77,7 +77,6 @@ wheels = [
 
 [[package]]
 name = "jaxplorer"
-version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "jax" },
@@ -95,8 +94,8 @@ typing = [
 
 [package.metadata]
 requires-dist = [
-    { name = "jax", specifier = ">=0.6" },
-    { name = "textual", specifier = ">=1.0" },
+    { name = "jax", specifier = ">=0.9" },
+    { name = "textual", specifier = ">=6.0" },
 ]
 
 [package.metadata.requires-dev]

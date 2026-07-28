@@ -12,11 +12,14 @@ StableHLO and optimized HLO on the right, and see all three change as you type.
  cpu · jax 0.11.0 · 134 ms · ok
 ```
 
-## Install
+## Installation
 
 ```bash
 uv sync
 ```
+
+Needs Python 3.12 or newer, `jax >= 0.9` and `textual >= 6.0`.
+Any CPU-only jax install is enough; a GPU or TPU backend is only needed to compile for one.
 
 ## Use
 
@@ -92,7 +95,7 @@ Compilation happens in a subprocess (`python -m jaxplorer.worker`) that stays wa
 JAX takes seconds to boot, XLA can abort the process outright, and the platform and `x64` flags can only be set before JAX is imported.
 
 For the rest of the pipeline (per-pass HLO dumps, LLVM IR, object code, and comparing two XLA
-builds against each other) see [docs/xla-introspection.md](docs/xla-introspection.md).
+builds against each other) see [docs/xla-introspection.md](https://github.com/nicholasjng/jaxplorer/blob/master/docs/xla-introspection.md).
 
 **jaxplorer executes the buffer.** It is your own code in your own environment, but a snippet is
 run at module level on every recompile, so treat it the way you would treat `python snippet.py`.

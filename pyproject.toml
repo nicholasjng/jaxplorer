@@ -4,14 +4,36 @@ build-backend = "hatchling.build"
 
 [project]
 name = "jaxplorer"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A compiler explorer TUI for inspecting compiled JAX programs"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = [
-    "jax>=0.6",
-    "textual>=1.0",
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Nicholas Junge", email = "nicho.junge@gmail.com" }]
+keywords = ["jax", "xla", "hlo", "compiler", "tui"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Compilers",
+    "Typing :: Typed",
 ]
+dependencies = [
+    # Hard floors: jax 0.8 and older emit no HLO stack-frame tables, so click-to-source silently finds nothing;
+    # textual 5 and older lack Static.content, which the tests read to assert what a pane displays.
+    "jax>=0.9",
+    "textual>=6.0",
+]
+
+[project.urls]
+Repository = "https://github.com/nicholasjng/jaxplorer"
+Issues = "https://github.com/nicholasjng/jaxplorer/issues"
 
 [project.scripts]
 jaxplorer = "jaxplorer.cli:main"
@@ -21,8 +43,6 @@ test = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
 ]
-# Single source of truth for the ty version: CI, the CLI, and Zed's LSP all
-# resolve ty from the project .venv (see .zed/settings.json).
 typing = [
     "ty>=0.0.42",
 ]
@@ -33,6 +53,9 @@ default-groups = ["test", "typing"]
 exclude-newer = "1 week"
 # ...except the toolchain, which we want at the latest release.
 exclude-newer-package = { ruff = false, ty = false }
+
+[tool.hatch.version]
+path = "src/jaxplorer/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jaxplorer"]
