@@ -4,9 +4,9 @@ Recipes for looking at what XLA did to a program, and for comparing what two XLA
 to the same program.
 
 jaxplorer covers most of this itself now: `--passes` (or `f6`) fills the Passes pane with a diff per
-pass and the LLVM IR pane with what went to LLVM, using the same dumps described below. Reach
-for the raw flags when you want the files on disk, a backend jaxplorer is not running, or the
-comparison in the last section.
+pass and the LLVM IR pane with what went to LLVM, using the same dumps described below, and `f4`
+switches that pane between a text diff and a structural one. Reach for the raw flags when you want
+the files on disk, a backend jaxplorer is not running, or the comparison in the last section.
 
 Everything marked *verified* was run while writing this, on jax and jaxlib 0.11.0, CPU
 backend, macOS arm64, Python 3.13. File counts and names come from that run and will drift
@@ -35,7 +35,7 @@ through `compile(compiler_options=...)` rather than the environment. To get the 
 instead, dump them yourself.
 
 ```bash
-XLA_FLAGS="--xla_dump_to=/tmp/dump" uv run jaxplorer examples/mlp.py
+XLA_FLAGS="--xla_dump_to=/tmp/dump" uv run jaxplorer mlp
 ```
 
 *Verified:* 11 entries for a two-line function.
@@ -196,6 +196,13 @@ numbering suffixes such as `%fusion.3` against `%fusion.5`, and `entry_computati
 when layout is not what you are studying. Pointing both workers at one jaxplorer checkout keeps
 absolute paths out of those tables in the first place.
 
+**That list is specific to comparing two builds, and does not transfer to comparing two passes.**
+*Verified* on a 2-layer MLP's 21 per-pass snapshots: normalizing metadata, sharding and numbering
+suffixes moved the diff from 113 changed lines to 109 and left the count of changed transitions at
+4. Within one compile, naming is already consistent, so there is nothing line-local to strip. What
+does mislead a pass-to-pass text diff is reordering and cross-computation renaming, which no
+line-based normalization can reach — hence the structural mode below.
+
 ### Better: let XLA do the diff
 
 Upstream has a semantic HLO diff, added 2025-04-05 in `xla/hlo/tools/hlo_diff`. It matches
@@ -216,8 +223,29 @@ wheel, no `HloDiff` symbols in `_jax.so`, `_xla.so` or `libjax_common.dylib`, no
 diff-related in `jaxlib.xla_client` or `jaxlib._jax`, and no Python bindings in the tool's
 `BUILD`.
 
-If you are working on XLA you have the checkout, so prefer this over any text diff. Keep a
-normalized text diff only as the fallback for environments without it.
+If you are working on XLA you have the checkout, so prefer this over anything below: it has the
+real cost model and match provenance.
+
+### Failing that: jaxplorer's own structural diff
+
+`f4` switches the Passes pane between a text diff and a structural one. The structural mode parses
+each snapshot's text into a graph (`jaxplorer.hlograph`) and matches the two graphs before reporting
+(`jaxplorer.hlodiff`), which is a deliberately small subset of what upstream does — no cost model,
+no HTML output, no match provenance.
+
+What it buys, *verified* on the same 21-snapshot MLP pipeline: 3 changed transitions instead of 4,
+because `HLO_passes_after_scheduling` only reordered instructions, and 74 report lines instead of
+192, because a rewrite that replaces 12 instructions with 3 custom fusions reports as that rather
+than as 66 lines of text. Fingerprints ignore metadata, layout and numbering suffixes by default,
+and walk operands rather than trusting printed order, which is what makes a rescheduling pass
+report nothing at all.
+
+Text remains the default mode, for two reasons. For a local change — `algsimp` dropping four
+instructions, `fusion` adding one computation — the unified diff is the better view, because seeing
+which four lines went away beats a count of them. And without an XLA checkout there is no oracle to
+check the matcher against, so the text diff stays available as the view that cannot be wrong. The
+structural mode declines rather than guesses when a module does not parse cleanly, and the pane says
+so and shows a text diff instead.
 
 ## Traps
 
@@ -252,5 +280,5 @@ All verified here except where noted.
 
 jaxplorer-side equivalents: `JAX_PLATFORMS` and `JAX_ENABLE_X64` are set for you by `--platform`
 and `--x64`. The worker inherits the rest of the environment, so any flag above can be set
-where you launch jaxplorer. *Verified:* `XLA_FLAGS="--xla_dump_to=DIR" uv run jaxplorer examples/mlp.py`
+where you launch jaxplorer. *Verified:* `XLA_FLAGS="--xla_dump_to=DIR" uv run jaxplorer mlp`
 dumps from inside the worker while the TUI runs.
