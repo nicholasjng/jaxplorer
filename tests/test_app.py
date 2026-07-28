@@ -7,7 +7,13 @@ from typing import cast
 from rich.text import Text
 from textual.widgets import HelpPanel, Input, Static, TabbedContent, Tabs, TextArea
 
-from jaxplorer.app import MAX_HIGHLIGHTS, JaxplorerApp, OutputPane
+from jaxplorer.app import (
+    DEBOUNCE_MAX,
+    DEBOUNCE_MIN,
+    MAX_HIGHLIGHTS,
+    JaxplorerApp,
+    OutputPane,
+)
 from jaxplorer.protocol import CompileResult
 
 
@@ -304,10 +310,10 @@ async def test_search_highlights_counts_and_cycles(snippet):
         assert f"{total}/{total}" in status_text(app)
 
 
-def highlighted(app: JaxplorerApp, pane: str) -> int:
-    """How many spans the search actually painted, as opposed to claimed to find."""
+def styled(app: JaxplorerApp, pane: str, style: str = "yellow") -> int:
+    """How many spans the pane actually painted, as opposed to claimed to find."""
     body = cast("Text", app.query_one(f"#body-{pane}", Static).content)
-    return sum(1 for span in body.spans if "yellow" in str(span.style))
+    return sum(1 for span in body.spans if style in str(span.style))
 
 
 async def test_an_uppercase_query_highlights_the_lowercase_hits_it_matched(snippet):
@@ -322,12 +328,7 @@ async def test_an_uppercase_query_highlights_the_lowercase_hits_it_matched(snipp
         app._apply_query("TANH")
 
         assert app._matches
-        assert highlighted(app, "optimized_hlo") > 0
-
-
-def styled(app: JaxplorerApp, pane: str, style: str) -> int:
-    body = cast("Text", app.query_one(f"#body-{pane}", Static).content)
-    return sum(1 for span in body.spans if style in str(span.style))
+        assert styled(app, "optimized_hlo") > 0
 
 
 async def test_the_current_hit_is_painted_differently_and_moves_with_n(snippet):
@@ -350,24 +351,30 @@ async def test_the_current_hit_is_painted_differently_and_moves_with_n(snippet):
         assert styled(app, "optimized_hlo", "orange1") > 0
 
 
+async def flood_hits(app: JaxplorerApp, pilot) -> None:
+    """Fill the Optimized HLO pane with more hits for ``tanh`` than the paint cap allows.
+
+    A span per hit is what makes a big module unwieldy to search, far more than filtering the
+    text they sit in.
+    """
+    app.action_show_pane("optimized_hlo")
+    await pilot.pause()
+    pane = app.query_one("#pane-optimized_hlo", OutputPane)
+    pane.show("\n".join(f"  %v{i} = f32[4] tanh(%v0)" for i in range(MAX_HIGHLIGHTS * 2)))
+    await pilot.pause()
+    app._apply_query("tanh")
+
+
 async def test_painted_hits_are_capped_but_the_count_is_not(snippet):
     app = make_app(snippet)
     async with app.run_test() as pilot:
         await settle(app, pilot=pilot)
-        app.action_show_pane("optimized_hlo")
-        await pilot.pause()
-        pane = app.query_one("#pane-optimized_hlo", OutputPane)
-        # More hits than the cap. A span per hit is what makes a big module unusable to
-        # search: 40k of them measured 24 ms to build and 91 ms for Textual to render.
-        pane.show("\n".join(f"  %v{i} = f32[4] tanh(%v0)" for i in range(MAX_HIGHLIGHTS * 2)))
-        await pilot.pause()
-
-        app._apply_query("tanh")
+        await flood_hits(app, pilot)
 
         assert len(app._matches) == MAX_HIGHLIGHTS * 2
         assert f"1/{MAX_HIGHLIGHTS * 2}" in status_text(app)
         # Cap plus the current hit painted on top of it.
-        assert styled(app, "optimized_hlo", "yellow") <= MAX_HIGHLIGHTS
+        assert styled(app, "optimized_hlo") <= MAX_HIGHLIGHTS
         assert styled(app, "optimized_hlo", "orange1") > 0
 
 
@@ -375,12 +382,7 @@ async def test_a_hit_past_the_paint_cap_is_still_shown_when_visited(snippet):
     app = make_app(snippet)
     async with app.run_test() as pilot:
         await settle(app, pilot=pilot)
-        app.action_show_pane("optimized_hlo")
-        await pilot.pause()
-        pane = app.query_one("#pane-optimized_hlo", OutputPane)
-        pane.show("\n".join(f"  %v{i} = f32[4] tanh(%v0)" for i in range(MAX_HIGHLIGHTS * 2)))
-        await pilot.pause()
-        app._apply_query("tanh")
+        await flood_hits(app, pilot)
 
         # Jump backwards to the last hit, which is far beyond the cap.
         app.action_prev_match()
@@ -408,7 +410,7 @@ async def test_matches_do_not_outlive_the_text_they_indexed(snippet):
         lines = len(app.query_one("#pane-optimized_hlo", OutputPane).lines)
         assert all(index < lines for index in app._matches)
         # And the highlight the re-render dropped is back, so n/N mean something.
-        assert not app._matches or highlighted(app, "optimized_hlo") > 0
+        assert not app._matches or styled(app, "optimized_hlo") > 0
 
 
 async def test_escape_abandons_the_search(snippet):
@@ -429,7 +431,7 @@ async def test_escape_abandons_the_search(snippet):
         assert not app.query_one("#search", Input).has_class("visible")
         assert app._query == ""
         assert app._matches == []
-        assert highlighted(app, "optimized_hlo") == 0
+        assert styled(app, "optimized_hlo") == 0
         # Focus lands somewhere useful rather than on the hidden input.
         assert isinstance(app.focused, OutputPane)
 
@@ -554,6 +556,10 @@ async def test_collecting_passes_fills_both_panes(snippet):
     app = make_app(snippet, passes=True)
     async with app.run_test() as pilot:
         await settle(app, pilot=pilot)
+        # Diffing the snapshots is deferred until the pane is looked at, which is what a
+        # user does before reading it.
+        app.action_show_pane("passes")
+        await pilot.pause()
 
         passes = pane_text(app, "passes")
         assert "snapshots" in passes
@@ -562,10 +568,39 @@ async def test_collecting_passes_fills_both_panes(snippet):
         assert "passes" in status_text(app)
 
 
+async def test_the_pass_report_is_not_built_until_the_pane_is_looked_at(snippet):
+    # Diffing every snapshot costs more than the compile that preceded it, and paying it while
+    # reading the jaxpr pane is latency the user feels on every keystroke.
+    app = make_app(snippet, passes=True)
+    async with app.run_test() as pilot:
+        await settle(app, pilot=pilot)
+
+        assert app.active_pane != "passes"
+        assert pane_text(app, "passes") == ""
+        assert app._passes_stale
+
+        app.action_show_pane("passes")
+        await pilot.pause()
+
+        assert not app._passes_stale
+        assert "pipeline order" in pane_text(app, "passes")
+
+
+async def test_a_pane_with_no_snapshots_still_explains_itself_without_being_visited(snippet):
+    # A constant string, so deferring it would only leave a blank pane.
+    app = make_app(snippet)
+    async with app.run_test() as pilot:
+        await settle(app, pilot=pilot)
+
+        assert "--passes" in pane_text(app, "passes")
+
+
 async def test_f4_switches_the_passes_pane_between_diff_modes(snippet):
     app = make_app(snippet, passes=True)
     async with app.run_test() as pilot:
         await settle(app, pilot=pilot)
+        app.action_show_pane("passes")
+        await pilot.pause()
 
         # Text is the default, because it is the view that cannot be wrong.
         assert not app.structural_diff
@@ -578,7 +613,7 @@ async def test_f4_switches_the_passes_pane_between_diff_modes(snippet):
         assert app.structural_diff
         assert "structural diff" in status_text(app)
         structural = pane_text(app, "passes")
-        # Both renderings keep the same document shape, so only the bodies differ.
+        # Both renderings keep the same document shape; only the bodies differ.
         assert "snapshots" in structural
         assert "pipeline order" in structural
         assert "@@" not in structural
@@ -588,6 +623,35 @@ async def test_f4_switches_the_passes_pane_between_diff_modes(snippet):
 
         assert not app.structural_diff
         assert "@@" in pane_text(app, "passes")
+
+
+async def test_the_debounce_tracks_how_long_a_compile_actually_takes(snippet):
+    # A fixed pause long enough for a slow model dominates the wall clock on a fast one.
+    app = make_app(snippet)
+    async with app.run_test() as pilot:
+        # Nothing has compiled yet, so there is nothing to measure and it stays cautious.
+        assert app.debounce == DEBOUNCE_MAX
+
+        result = await settle(app, pilot=pilot)
+
+        assert app.debounce < DEBOUNCE_MAX
+        assert app.debounce >= DEBOUNCE_MIN
+        # A fast compile means a short wait, not a fixed one.
+        if result.total_ms < DEBOUNCE_MIN * 1000:
+            assert app.debounce == DEBOUNCE_MIN
+
+
+async def test_a_slow_compile_earns_a_longer_pause(snippet):
+    app = make_app(snippet)
+    async with app.run_test() as pilot:
+        result = await settle(app, pilot=pilot)
+
+        app._last_result = replace(result, total_ms=10_000.0)
+        # Clamped, so one pathological compile cannot make the editor feel dead.
+        assert app.debounce == DEBOUNCE_MAX
+
+        app._last_result = replace(result, total_ms=300.0)
+        assert app.debounce == 0.3
 
 
 async def test_the_status_line_says_when_the_chain_stopped_early(snippet):
@@ -616,8 +680,8 @@ async def test_f3_leaves_the_passes_pane_alone(snippet):
         app.show_metadata = True
         await pilot.pause()
 
-        # pass_report already strips the tables from both sides of every diff, so there is
-        # nothing left for the filter to do here; it must not mangle the report either.
+        # pass_report already strips the tables from both sides of every diff, so the filter
+        # has nothing to do here and must not mangle the report either.
         assert pane_text(app, "passes") == before
         # And the pane it does own still changes.
         assert "FileNames" in pane_text(app, "optimized_hlo")
@@ -649,7 +713,7 @@ async def test_question_mark_opens_the_keys_from_a_pane_but_types_in_the_editor(
         await pilot.pause()
         assert app.query(HelpPanel)
 
-        # The reason it is bound on the pane and not the app: in the editor it is a character.
+        # Why it is bound on the pane and not the app: in the editor it is a character.
         editor = app.query_one("#editor", TextArea)
         editor.focus()
         await pilot.pause()
@@ -741,6 +805,34 @@ async def test_f2_stops_offering_a_backend_that_failed(snippet):
         assert "definitely-not-a-backend" in app._dead_platforms
         app.action_cycle_platform()
         assert app.session.platform != "definitely-not-a-backend"
+
+
+async def test_a_backend_that_fails_on_the_compile_path_is_also_remembered(snippet):
+    # The first compile goes through compile(), which turns a startup failure into a fatal
+    # result rather than raising; f2's own path raises. `jaxplorer --platform tpu` without one
+    # lands here.
+    app = JaxplorerApp(source=snippet, platform="definitely-not-a-backend")
+    async with app.run_test() as pilot:
+        await settle(app, pilot=pilot)
+
+        assert app._last_result is not None and app._last_result.fatal is not None
+        assert "definitely-not-a-backend" in app._dead_platforms
+        app.action_cycle_platform()
+        assert app.session.platform != "definitely-not-a-backend"
+
+
+async def test_a_broken_snippet_does_not_condemn_the_backend(snippet):
+    # The discriminator is the startup failure, not the fatal: a good backend produces those
+    # all day for a buffer that does not parse.
+    app = make_app(snippet)
+    async with app.run_test() as pilot:
+        await settle(app, pilot=pilot)
+
+        await app._compile("def f(:\n")
+        await pilot.pause()
+
+        assert app._last_result is not None and app._last_result.fatal is not None
+        assert app._dead_platforms == set()
 
 
 async def test_an_unavailable_backend_reports_instead_of_hanging(snippet):
