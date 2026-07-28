@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from contextlib import suppress
+from itertools import islice
 from pathlib import Path
 from typing import ClassVar
 
@@ -41,14 +42,15 @@ PANES: tuple[Pane, ...] = (*ALL_STAGES, "passes", "llvm_ir", "errors")
 # Panes holding HLO instructions, so a click can be traced back to the source that built one.
 HLO_PANES: frozenset[Pane] = frozenset({"optimized_hlo", "passes"})
 
-# Where f3 does something. Only the optimized-HLO pane shows a whole module with the debug
-# tables still attached; pass_report has already stripped them from both sides of every diff
-# it renders, so filtering the Passes pane was a no-op that made the key look broken.
+# Panes f3 applies to. Only this one shows a whole module with the tables still attached;
+# pass_report strips them from both sides of every diff it renders.
 METADATA_PANES: frozenset[Pane] = frozenset({"optimized_hlo"})
 
-# Long enough that ordinary typing does not trigger a compile, short enough that a
-# pause feels immediate.
-DEBOUNCE = 0.35
+# Bounds on how long a pause in typing counts as "done typing". A fixed wait long enough for a
+# slow model dwarfs the compile it protects on a fast one, so it tracks the last compile
+# instead. Overshooting costs a cancelled compile, not a wrong answer.
+DEBOUNCE_MIN = 0.15
+DEBOUNCE_MAX = 0.6
 
 PLATFORM_CYCLE = ("cpu", "gpu", "tpu")
 
@@ -56,8 +58,7 @@ MATCH_STYLE = "black on yellow"
 # The hit n/N is sitting on, so it is distinguishable from the others around it.
 CURRENT_MATCH_STYLE = "black on orange1"
 
-# Cap on painted search hits per render. Not a limit on matches found: the status line counts
-# them all. See OutputPane.refresh_text for why the spans, not the text, are the cost.
+# Cap on painted search hits per render, not on matches found: the status line counts them all.
 MAX_HIGHLIGHTS = 2_000
 
 # Short names for the status line, where four timings plus a total have to fit.
@@ -81,6 +82,22 @@ args = (
     jax.ShapeDtypeStruct((16, 4), jnp.float32),
 )
 """
+
+
+def _line_span(text: str, index: int) -> tuple[int, int] | None:
+    """Character range of line ``index`` in ``text``, or ``None`` if it has no such line.
+
+    Walks newlines rather than splitting: highlighting one line of a module should not build a
+    list of every line in it.
+    """
+    begin = 0
+    for _ in range(index):
+        newline = text.find("\n", begin)
+        if newline < 0:
+            return None
+        begin = newline + 1
+    end = text.find("\n", begin)
+    return begin, len(text) if end < 0 else end
 
 
 class SnippetEditor(TextArea):
@@ -198,35 +215,25 @@ class OutputPane(ScrollableContainer):
 
         Notes
         -----
-        Only the first :data:`MAX_HIGHLIGHTS` occurrences are painted. A style span per hit is
-        by far the most expensive part of a keystroke — measured on a 1.9 MB module, 40k spans
-        cost 24 ms to build and 91 ms for Textual to render, against 3 ms to filter the text —
-        and a module with tens of thousands of hits gains nothing from painting them all. The
-        match counter in the status line comes from :meth:`match_lines`, so it stays truthful,
-        and ``current`` is painted whether or not the cap was reached, so navigating past it
-        still shows you where you are.
+        Only the first :data:`MAX_HIGHLIGHTS` occurrences are painted: a span per hit is the
+        dominant cost of a keystroke, and a module with tens of thousands of them gains nothing
+        from the rest. ``current`` is painted whether or not the cap was reached, so navigating
+        past it still shows you where you are.
         """
         # A Text object rather than a markup string: HLO is full of f32[8,16], which Rich
         # would otherwise try to parse.
         text = self.displayed
         body = Text(text)
         if query:
-            # IGNORECASE to agree with match_lines, which casefolds. Without it an uppercase
-            # query scrolls to a lowercase hit and highlights nothing.
+            # IGNORECASE to agree with match_lines, which casefolds.
             pattern = re.compile(re.escape(query), re.IGNORECASE)
-            for painted, found in enumerate(pattern.finditer(text)):
-                if painted >= MAX_HIGHLIGHTS:
-                    break
+            for found in islice(pattern.finditer(text), MAX_HIGHLIGHTS):
                 body.stylize(MATCH_STYLE, found.start(), found.end())
-            if current is not None:
-                lines = self.lines
-                if 0 <= current < len(lines):
-                    # +1 per line for the newline that split() consumed.
-                    begin = sum(len(line) + 1 for line in lines[:current])
-                    for found in pattern.finditer(lines[current]):
-                        body.stylize(
-                            CURRENT_MATCH_STYLE, begin + found.start(), begin + found.end()
-                        )
+            span = _line_span(text, current) if current is not None else None
+            if span is not None:
+                # Bounded rather than scanning a copy of the line and offsetting every hit.
+                for found in pattern.finditer(text, *span):
+                    body.stylize(CURRENT_MATCH_STYLE, found.start(), found.end())
         self._body.update(body)
 
     @property
@@ -379,8 +386,9 @@ class JaxplorerApp(App[None]):
 
     status: var[str] = var("starting worker …")
     show_metadata: var[bool] = var(False)
-    # Defaults to the text diff: for a local change, seeing which four lines went away beats
-    # a count of them, and the structural matcher has no oracle to be checked against.
+    # Defaults to the text diff: for a local change, seeing which lines went away beats a count
+    # of them, and without an XLA checkout the structural matcher has nothing to be checked
+    # against.
     structural_diff: var[bool] = var(False)
 
     def __init__(
@@ -412,6 +420,8 @@ class JaxplorerApp(App[None]):
         self._debounce_timer = None
         self._last_result: CompileResult | None = None
         self._debug_info: DebugInfo | None = None
+        # Whether the Passes pane still shows a previous compile's report.
+        self._passes_stale = False
         # Platforms whose worker refused to start, so f2 stops offering them.
         self._dead_platforms: set[str] = set()
         self._query = ""
@@ -450,10 +460,15 @@ class JaxplorerApp(App[None]):
             self.query_one("#status", Static).update(status)
 
     def watch_show_metadata(self, _show: bool) -> None:
-        """Re-render every pane when the metadata filter is toggled."""
+        """Re-render the panes the metadata filter applies to."""
         with suppress(NoMatches):
+            active = self.active_pane
+            # Everything else renders `raw` either way, so re-rendering it would produce the
+            # same bytes. A pane switched to later gets the query re-applied on activation.
             for pane in self.query(OutputPane):
-                if pane.pane == self.active_pane:
+                if pane.pane not in METADATA_PANES:
+                    continue
+                if pane.pane == active:
                     pane.refresh_text(self._query, current=self._current_line())
                 else:
                     pane.refresh_text()
@@ -467,8 +482,8 @@ class JaxplorerApp(App[None]):
         result = self._last_result
         if result is None or result.fatal is not None:
             return
-        with suppress(NoMatches):
-            self._show("passes", pass_report(result.passes, structural=structural))
+        self._passes_stale = True
+        self._render_passes()
         # The status line names the mode, so leaving it alone would leave it lying.
         self.status = self._status_line(result, result.errors())
 
@@ -493,7 +508,19 @@ class JaxplorerApp(App[None]):
         # Re-arm on every keystroke so only the pause at the end costs a compile.
         if self._debounce_timer is not None:
             self._debounce_timer.stop()
-        self._debounce_timer = self.set_timer(DEBOUNCE, self.action_recompile)
+        self._debounce_timer = self.set_timer(self.debounce, self.action_recompile)
+
+    @property
+    def debounce(self) -> float:
+        """Seconds of quiet before a keystroke triggers a compile.
+
+        Tracks the last compile's duration, clamped to ``DEBOUNCE_MIN``..``DEBOUNCE_MAX`` for
+        the reasons given where those are defined. Until something has compiled there is
+        nothing to go on, so it starts cautious.
+        """
+        if self._last_result is None:
+            return DEBOUNCE_MAX
+        return min(max(self._last_result.total_ms / 1000, DEBOUNCE_MIN), DEBOUNCE_MAX)
 
     def on_key(self, event: events.Key) -> None:
         """Move between the tab bar and the IR under it.
@@ -509,8 +536,7 @@ class JaxplorerApp(App[None]):
             self.query_one(TabbedContent).query_one(Tabs).focus()
             event.stop()
         elif isinstance(self.focused, Input) and event.key == "escape":
-            # Without this the only way out of the search bar is enter, which is not what
-            # escape means anywhere else in the app.
+            # Enter is the only other way out, and escape means "give up" everywhere else.
             self._clear_search()
             event.stop()
 
@@ -563,10 +589,7 @@ class JaxplorerApp(App[None]):
         # Matches first, so the render knows which hit to emphasise.
         self._matches = pane.match_lines(query)
         self._match = 0
-        pane.refresh_text(query, current=self._current_line())
-        if self._matches:
-            self._scroll_to_match(pane)
-        self._report_matches()
+        self._show_match(pane)
 
     def _current_line(self) -> int | None:
         """Displayed line index of the hit being visited, if there is one."""
@@ -574,9 +597,14 @@ class JaxplorerApp(App[None]):
             return None
         return self._matches[self._match]
 
-    def _scroll_to_match(self, pane: OutputPane) -> None:
-        # A little context above the hit rather than pinning it to the top edge.
-        pane.scroll_to(y=max(0, self._matches[self._match] - 2), animate=False)
+    def _show_match(self, pane: OutputPane) -> None:
+        """Repaint, scroll and report, so the current hit is visible however it was chosen."""
+        pane.refresh_text(self._query, current=self._current_line())
+        line = self._current_line()
+        if line is not None:
+            # A little context above the hit rather than pinning it to the top edge.
+            pane.scroll_to(y=max(0, line - 2), animate=False)
+        self._report_matches()
 
     def _report_matches(self) -> None:
         if not self._query:
@@ -589,11 +617,7 @@ class JaxplorerApp(App[None]):
         if not self._matches:
             return
         self._match = (self._match + delta) % len(self._matches)
-        pane = self.query_one(f"#pane-{self.active_pane}", OutputPane)
-        # Re-render so the emphasis moves with the cursor, not just the scroll position.
-        pane.refresh_text(self._query, current=self._current_line())
-        self._scroll_to_match(pane)
-        self._report_matches()
+        self._show_match(self.query_one(f"#pane-{self.active_pane}", OutputPane))
 
     def action_next_match(self) -> None:
         """Scroll to the next match, wrapping at the end."""
@@ -604,7 +628,9 @@ class JaxplorerApp(App[None]):
         self._step_match(-1)
 
     def on_tabbed_content_tab_activated(self, _event: TabbedContent.TabActivated) -> None:
-        """Re-run the active query against the newly shown pane."""
+        """Bring the newly shown pane up to date, then re-run the active query against it."""
+        # Before the query, which indexes whatever the pane ends up holding.
+        self._render_passes()
         # A query follows the user to whichever pane they switch to.
         if self._query:
             self._apply_query(self._query)
@@ -634,6 +660,9 @@ class JaxplorerApp(App[None]):
             return
         if result is None:
             return  # superseded by a newer request
+        if result.startup_failed:
+            # f2 skips only what it has been told about, and a backend can fail here too.
+            self._condemn_platform()
         self._render(result)
 
     @property
@@ -693,13 +722,16 @@ class JaxplorerApp(App[None]):
         self.status = f"switching to {self.session.platform} …"
         self.run_worker(self._restart(), group="compile", exclusive=True)
 
+    def _condemn_platform(self) -> None:
+        """Remember that this backend will not start here, so f2 stops offering it."""
+        self._dead_platforms.add(self.session.platform or "")
+
     async def _restart(self) -> None:
         # A platform change only takes effect before JAX is imported, hence a fresh worker.
         try:
             await self.session.restart()
         except WorkerStartupError as exc:  # e.g. no such backend on this machine
-            # Remembering the failure is what stops f2 walking into it again.
-            self._dead_platforms.add(self.session.platform or "")
+            self._condemn_platform()
             self._show("errors", str(exc))
             self.query_one(TabbedContent).active = "errors"
             self.status = f"{self.session.platform} unavailable"
@@ -759,6 +791,23 @@ class JaxplorerApp(App[None]):
     def _show(self, pane: Pane, text: str) -> None:
         self.query_one(f"#pane-{pane}", OutputPane).show(text)
 
+    def _render_passes(self) -> None:
+        """Build the Passes report, if it is stale and anyone can see it.
+
+        Diffing every snapshot costs more than the compile that produced them, so it waits for
+        the pane to be on top. Both callers that mark it stale run once a result exists.
+        """
+        result = self._last_result
+        if not self._passes_stale or result is None:
+            return
+        # Nothing to defer when there are no snapshots: the report is then a constant hint,
+        # and a blank pane would be worse.
+        if result.passes and self.active_pane != "passes":
+            return
+        self._passes_stale = False
+        with suppress(NoMatches):
+            self._show("passes", pass_report(result.passes, structural=self.structural_diff))
+
     def _render(self, result: CompileResult) -> None:
         self._last_result = result
 
@@ -781,7 +830,8 @@ class JaxplorerApp(App[None]):
 
             hlo = result.stages.get("optimized_hlo")
             self._debug_info = DebugInfo.parse(hlo.text) if hlo and hlo.text else None
-            self._show("passes", pass_report(result.passes, structural=self.structural_diff))
+            self._passes_stale = True
+            self._render_passes()
             self._show("llvm_ir", result.llvm_ir or _NO_LLVM_IR)
 
         errors = result.errors()
