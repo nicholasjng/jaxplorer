@@ -12,7 +12,7 @@ import re
 import sys
 from pathlib import Path
 
-from jaxplorer import __version__
+from jaxplorer import __version__, examples
 from jaxplorer.protocol import ALL_STAGES
 from jaxplorer.session import DEFAULT_TIMEOUT
 
@@ -38,10 +38,11 @@ class _HelpFormatter(argparse.HelpFormatter):
     def format_help(self) -> str:
         """Return the help text, colorized when stdout is an interactive terminal."""
         text = super().format_help()
-        # TTY check at format time, not import: anything capturing stdout gets plain text.
-        if os.environ.get("NO_COLOR") or not sys.stdout.isatty():
+        from jaxplorer._console import color_enabled, sgr
+
+        # Checked at format time, not import: anything capturing stdout gets plain text.
+        if not color_enabled(sys.stdout):
             return text
-        from jaxplorer._console import sgr
 
         # The patterns cannot overlap, and ANSI codes carry no -, --, or <>, so the
         # substitutions never nest.
@@ -87,7 +88,11 @@ def build_parser() -> argparse.ArgumentParser:
         "inputs (concrete arrays or jax.ShapeDtypeStruct).",
     )
     parser.add_argument(
-        "file", nargs="?", type=Path, help="Snippet to open; omit for a scratch buffer."
+        "file",
+        nargs="?",
+        type=Path,
+        help="Snippet to open; omit for a scratch buffer. A name that is not a path is "
+        f"looked up among the bundled examples ({', '.join(examples.names())}).",
     )
     parser.add_argument("--version", action="version", version=f"jaxplorer {__version__}")
     parser.add_argument(
@@ -114,8 +119,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--stages",
         type=_stage_list,
         default=list(ALL_STAGES),
-        help=f"Comma-separated subset of {', '.join(ALL_STAGES)}. Stopping before "
-        "optimized_hlo skips XLA entirely, which is much faster on a large model.",
+        help=f"Comma-separated subset of {', '.join(ALL_STAGES)}. The chain stops after the "
+        "last one asked for, so leaving out optimized_hlo skips XLA, which is most of a "
+        "compile on a large model.",
     )
     parser.add_argument(
         "--passes",
@@ -128,11 +134,118 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_TIMEOUT,
         help=f"Give up on a compile after this long, in seconds (default: {DEFAULT_TIMEOUT:g}s).",
     )
+    parser.add_argument(
+        "--print",
+        dest="print_pane",
+        metavar="<pane>",
+        choices=(*ALL_STAGES, "passes", "llvm_ir"),
+        help="Print one pane to stdout and exit instead of starting the TUI, for piping "
+        f"and scripting. One of {', '.join((*ALL_STAGES, 'passes', 'llvm_ir'))}.",
+    )
+    parser.add_argument(
+        "--structural-diff",
+        action="store_true",
+        help="Compare pass snapshots as graphs rather than as text, which is what f4 "
+        "toggles in the TUI.",
+    )
+    parser.add_argument(
+        "--examples",
+        action="store_true",
+        help="List the bundled examples and exit.",
+    )
     return parser
 
 
+def _print_pane(args: argparse.Namespace, *, path: Path | None, source: str | None) -> int:
+    """Compile once, write one pane to stdout, and return an exit status.
+
+    Deliberately does not touch :mod:`jaxplorer.app`, so ``--print`` needs no terminal and
+    does not import textual. The compile still happens in the worker subprocess, which is
+    where jax lives.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed arguments, including ``print_pane``.
+    path : Path or None
+        File the snippet came from, for tracebacks and click-to-source metadata.
+    source : str or None
+        Snippet text, when it did not come from ``path``.
+
+    Returns
+    -------
+    int
+        0 when the pane was printed, 1 when the compile or that stage failed.
+    """
+    import asyncio
+
+    from jaxplorer._console import color_enabled, sgr
+    from jaxplorer.hlo import pass_report
+    from jaxplorer.session import WorkerSession
+
+    pane = args.print_pane
+    if source is None:
+        source = path.read_text(encoding="utf-8") if path is not None else ""
+
+    # Ask for what is being printed, whatever --stages says: the chain now stops after the
+    # last requested stage, so a narrow --stages would otherwise leave the pane empty.
+    wanted = "optimized_hlo" if pane in ("passes", "llvm_ir") else pane
+    stages = [stage for stage in ALL_STAGES if stage in args.stages or stage == wanted]
+    passes = args.passes or pane in ("passes", "llvm_ir")
+
+    async def run() -> int:
+        session = WorkerSession(
+            platform=args.platform,
+            x64=args.x64,
+            timeout=args.timeout,
+            executable=args.python,
+        )
+        try:
+            result = await session.compile(
+                source, str(path) if path else "<snippet>", stages, passes
+            )
+        finally:
+            await session.close()
+
+        # color_enabled, not a bare isatty: NO_COLOR and FORCE_COLOR have to be honoured on
+        # this path too, and it is the same helper --help styling goes through.
+        color = color_enabled(sys.stderr)
+        if result is None:
+            # Only reachable if a newer request superseded this one, and there is no newer
+            # request here. Say so rather than exiting non-zero in silence.
+            print(
+                sgr("the compile was superseded before it finished", "red", enabled=color),
+                file=sys.stderr,
+            )
+            return 1
+        if result.fatal:
+            print(sgr(result.fatal, "red", enabled=color), file=sys.stderr)
+            return 1
+        if pane == "passes":
+            print(pass_report(result.passes, structural=args.structural_diff))
+            return 0
+        if pane == "llvm_ir":
+            if not result.llvm_ir:
+                print(
+                    sgr("this backend emitted no LLVM IR", "yellow", enabled=color),
+                    file=sys.stderr,
+                )
+                return 1
+            print(result.llvm_ir)
+            return 0
+        outcome = result.stages.get(pane)
+        if outcome is None or outcome.error or outcome.text is None:
+            message = outcome.error if outcome and outcome.error else f"{pane} produced nothing"
+            print(sgr(message, "red", enabled=color), file=sys.stderr)
+            return 1
+        print(outcome.text)
+        return 0
+
+    return asyncio.run(run())
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Parse arguments and run the TUI until the user quits.
+    """Parse arguments and run the TUI until the user quits, or print one pane and exit.
 
     Parameters
     ----------
@@ -152,18 +265,42 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if args.examples:
+        for name in examples.names():
+            print(name)
+        return 0
     if args.watch and args.file is None:
         parser.error("--watch needs a FILE to watch")
-    if args.file is not None and not args.file.is_file():
-        parser.error(f"no such file: {args.file}")
+    if args.watch and args.print_pane is not None:
+        # --print compiles once and exits, so there is nothing for a reload to update.
+        parser.error("--watch and --print do opposite things; pick one")
     if args.python is not None and not os.access(args.python, os.X_OK):
         parser.error(f"not an executable interpreter: {args.python}")
+
+    # A name that is not a path may be a bundled example. Those are read out of the wheel, so
+    # they open as a scratch buffer with no path: saving over a file in site-packages would be
+    # a surprising thing for `jaxplorer mlp` to do.
+    path: Path | None = args.file
+    source: str | None = None
+    if args.file is not None and not args.file.is_file():
+        source = examples.load(args.file.name)
+        if source is None:
+            parser.error(
+                f"no such file: {args.file}\nbundled examples: {', '.join(examples.names())}"
+            )
+        if args.watch:
+            parser.error(f"--watch needs a file on disk; {args.file.name} is a bundled example")
+        path = None
+
+    if args.print_pane is not None:
+        return _print_pane(args, path=path, source=source)
 
     # Imported late so that --help stays instant.
     from jaxplorer.app import JaxplorerApp
 
     JaxplorerApp(
-        path=args.file,
+        path=path,
+        source=source,
         watch=args.watch,
         platform=args.platform,
         x64=args.x64,
@@ -171,6 +308,7 @@ def main(argv: list[str] | None = None) -> int:
         passes=args.passes,
         timeout=args.timeout,
         executable=args.python,
+        structural_diff=args.structural_diff,
     ).run()
     return 0
 

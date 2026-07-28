@@ -5,6 +5,7 @@ import sys
 
 import pytest
 
+from jaxplorer import __version__, examples
 from jaxplorer.cli import build_parser, main
 from jaxplorer.protocol import ALL_STAGES
 from jaxplorer.session import DEFAULT_TIMEOUT
@@ -66,7 +67,119 @@ def test_missing_file_is_rejected(capsys):
     with pytest.raises(SystemExit):
         main(["does-not-exist.py"])
 
-    assert "no such file" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "no such file" in error
+    # And it says what names would have worked, since a bare name is a valid way in.
+    assert "bundled examples" in error
+
+
+def test_version_is_reported(capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--version"])
+
+    assert exit_info.value.code == 0
+    assert __version__ in capsys.readouterr().out
+
+
+def test_the_bundled_examples_are_reachable_from_the_package():
+    # v0.1.0 shipped none of these while the README told users to open examples/mlp.py, so
+    # this asserts on importlib.resources rather than on a path relative to the repo.
+    assert "mlp" in examples.names()
+    assert examples.load("mlp") == examples.load("mlp.py")
+    source = examples.load("mlp")
+    assert source is not None
+    assert "args" in source
+    assert examples.load("nope") is None
+
+
+def test_a_bundled_example_name_is_accepted_in_place_of_a_path(monkeypatch, tmp_path, capsys):
+    # From a directory with no examples/ in it, which is every installed user's situation.
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["mlp", "--print", "jaxpr", "--platform", "cpu"]) == 0
+
+    assert "dot_general" in capsys.readouterr().out
+
+
+def test_watching_a_bundled_example_is_rejected(capsys):
+    # It lives in site-packages; there is nothing sensible to watch or save over.
+    with pytest.raises(SystemExit):
+        main(["mlp", "--watch"])
+
+    assert "bundled example" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("pane", "needle"),
+    [
+        ("jaxpr", "dot_general"),
+        ("stablehlo", "stablehlo"),
+        ("optimized_hlo", "HloModule"),
+        ("analysis", "Cost:"),
+        ("passes", "pipeline order"),
+    ],
+)
+def test_print_writes_one_pane_to_stdout(capsys, pane, needle):
+    assert main(["mlp", "--print", pane, "--platform", "cpu"]) == 0
+
+    assert needle in capsys.readouterr().out
+
+
+def test_print_implies_the_stage_it_needs(capsys):
+    # --stages now stops the chain, so printing a pane outside it has to widen the request
+    # rather than come back empty.
+    assert main(["mlp", "--print", "optimized_hlo", "--stages", "jaxpr", "--platform", "cpu"]) == 0
+
+    assert "HloModule" in capsys.readouterr().out
+
+
+def test_print_reports_a_failing_snippet_on_stderr(capsys, tmp_path):
+    path = tmp_path / "bad.py"
+    path.write_text("def f(x):\n    return x.nope()\n\nargs = (1.0,)\n")
+
+    assert main([str(path), "--print", "jaxpr", "--platform", "cpu"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "nope" in captured.err
+
+
+def test_print_passes_can_use_the_structural_diff(capsys):
+    assert main(["scan", "--print", "passes", "--structural-diff", "--platform", "cpu"]) == 0
+
+    out = capsys.readouterr().out
+    assert "pipeline order" in out
+    # The structural renderer's shape, which the text diff never emits.
+    assert "@@" not in out
+
+
+def test_examples_can_be_listed(capsys):
+    assert main(["--examples"]) == 0
+
+    listed = capsys.readouterr().out.split()
+    assert listed == list(examples.names())
+
+
+def test_watching_and_printing_together_is_rejected(capsys, tmp_path):
+    path = tmp_path / "snippet.py"
+    path.touch()
+
+    with pytest.raises(SystemExit):
+        main([str(path), "--watch", "--print", "jaxpr"])
+
+    assert "pick one" in capsys.readouterr().err
+
+
+def test_listing_the_examples_costs_no_filesystem_walk_per_call():
+    # The names go into --help, so this must not scan the package every invocation.
+    assert examples.names() is examples.names()
+
+
+def test_an_unknown_print_pane_is_rejected(capsys):
+    with pytest.raises(SystemExit):
+        main(["mlp", "--print", "nonsense"])
+
+    assert "invalid choice" in capsys.readouterr().err
 
 
 def test_help_uses_spiky_metavars_and_stays_plain_when_piped():
