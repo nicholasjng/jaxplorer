@@ -117,6 +117,33 @@ def test_snippet_jit_options_win_over_an_already_jitted_f():
     assert "f32[12]" in stage_text(result, "jaxpr")
 
 
+def test_jit_options_on_an_unwrappable_already_jitted_f_is_a_contract_error():
+    # A third-party jit wrapper (unlike jax.jit) may not set __wrapped__, so jaxplorer has
+    # nowhere to apply static_argnums; it must say so instead of silently ignoring it.
+    source = (
+        "import jax\n"
+        "import jax.numpy as jnp\n"
+        "class FakeJitted:\n"
+        "    def __init__(self, fn):\n"
+        "        self._fn = jax.jit(fn)\n"
+        "    def trace(self, *a, **k):\n"
+        "        return self._fn.trace(*a, **k)\n"
+        "    def lower(self, *a, **k):\n"
+        "        return self._fn.lower(*a, **k)\n"
+        "    def __call__(self, *a, **k):\n"
+        "        return self._fn(*a, **k)\n"
+        "def g(x, n):\n"
+        "    return jnp.tile(x, n)\n"
+        "f = FakeJitted(g)\n"
+        "args = (jax.ShapeDtypeStruct((3,), jnp.float32), 4)\n"
+        "static_argnums = (1,)\n"
+    )
+    result = run(source)
+
+    assert "already jitted" in fatal(result)
+    assert "static_argnums" in fatal(result)
+
+
 def test_kwargs_are_passed():
     source = (
         "import jax\n"

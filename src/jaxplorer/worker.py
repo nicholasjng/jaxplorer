@@ -163,7 +163,13 @@ def _jit(f: Any, jit_opts: dict[str, Any]) -> Any:
             return f
         inner = getattr(f, "__wrapped__", None)
         if inner is None:
-            return f
+            names = ", ".join(jit_opts)
+            raise ContractError(
+                f"`f` is already jitted, and jaxplorer cannot find the function it wraps to "
+                f"apply {names} to.\n"
+                f"Either undecorate `f` and let jaxplorer jit it, or drop {names} from the "
+                "snippet and keep `f`'s own jit options."
+            )
         f = inner
     return jax.jit(f, **jit_opts)
 
@@ -361,6 +367,7 @@ def _handle(request: CompileRequest, dumps: Path | None) -> CompileResult:
     try:
         namespace = _exec_snippet(request.source, request.filename)
         f, args, kwargs, jit_opts = _entry_from(namespace)
+        jitted = _jit(f, jit_opts)
     except ContractError as exc:
         result.fatal = str(exc)
         result.total_ms = (time.perf_counter() - started) * 1000
@@ -374,7 +381,7 @@ def _handle(request: CompileRequest, dumps: Path | None) -> CompileResult:
     # as anyone needs (see `last` below). A failure keeps earlier results, since a valid jaxpr
     # beside a lowering error is the signal the user is after.
     def do_jaxpr(_prev: Any) -> tuple[Any, str]:
-        traced = _jit(f, jit_opts).trace(*args, **kwargs)
+        traced = jitted.trace(*args, **kwargs)
         return traced, str(traced.jaxpr)
 
     def do_stablehlo(traced: Any) -> tuple[Any, str]:
