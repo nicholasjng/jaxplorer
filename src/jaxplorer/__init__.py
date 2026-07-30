@@ -10,6 +10,6 @@ The pieces live in :mod:`jaxplorer.app` (the TUI), :mod:`jaxplorer.session` (wor
 :mod:`jaxplorer.hlodiff` (comparing two of those graphs).
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = ["__version__"]
